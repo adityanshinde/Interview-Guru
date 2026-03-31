@@ -6,6 +6,11 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { pipeline, env } from '@xenova/transformers';
+import { authMiddleware, quotaMiddleware } from './server/middleware/authMiddleware';
+import { recordVoiceUsage, recordChatUsage, getRemainingQuota, upgradeUserPlan } from './server/lib/usageStorage';
+import { PLAN_LIMITS } from './src/lib/planLimits';
+import { AuthRequest } from './src/lib/types';
+import { initializeDatabase } from './server/lib/database';
 
 // Suppress local transformer model warnings and force download
 env.allowLocalModels = false;
@@ -58,12 +63,29 @@ function extractJSON(content: string): any {
 
 dotenv.config();
 
+// Initialize database connection pool on startup
+console.log('[Server] Initializing database pool...');
+const dbPool = initializeDatabase();
+console.log('[Server] Database pool initialized');
+
+let serverStarted = false;
+
 export async function startServer(): Promise<number> {
+  // Prevent multiple server instances from starting
+  if (serverStarted) {
+    console.log('[Server] ℹ️  Server already started');
+    return parseInt(process.env.PORT || '3000');
+  }
+  serverStarted = true;
+
   const app = express();
   let initialPort = process.env.PORT ? parseInt(process.env.PORT) : 3000;
   const httpServer = createServer(app);
 
   app.use(express.json({ limit: '50mb' }));
+
+  // Apply auth middleware to /api routes
+  app.use('/api', authMiddleware);
 
   function getGroq(customKey?: string) {
     const key = customKey || process.env.GROQ_API_KEY;
@@ -80,14 +102,16 @@ export async function startServer(): Promise<number> {
     res.json({ status: 'ok' });
   });
 
-  app.post("/api/transcribe", async (req, res) => {
+  app.post("/api/transcribe", quotaMiddleware('voice'), async (req: express.Request, res) => {
     let tmpFilePath = '';
     try {
-      const customKey = req.headers['x-api-key'] as string;
-      const customVoiceModel = req.headers['x-voice-model'] as string;
+      const authReq = req as AuthRequest;
+      
+      const customKey = (req.headers['x-api-key'] as string) || '';
+      const customVoiceModel = (req.headers['x-voice-model'] as string) || 'whisper-large-v3-turbo';
       const groq = getGroq(customKey);
 
-      const { audioBase64, mimeType } = req.body;
+      const { audioBase64, mimeType, audioChunkDuration } = req.body;
       if (!audioBase64) {
         return res.status(400).json({ error: "No audio provided" });
       }
@@ -196,7 +220,21 @@ export async function startServer(): Promise<number> {
         text = "";
       }
 
-      res.json({ text });
+      // Record voice usage if user authenticated
+      if (authReq.user) {
+        const voiceMinutes = Math.ceil((audioChunkDuration || 5) / 60);
+        await recordVoiceUsage(authReq.user.userId, voiceMinutes);
+      }
+
+      const remainingVoice = authReq.user ? await getRemainingQuota(authReq.user.userId, 'voice') : 0;
+
+      res.json({
+        text,
+        usage: {
+          voiceMinutesUsed: audioChunkDuration ? Math.ceil(audioChunkDuration / 60) : 0,
+          remainingMinutes: remainingVoice,
+        },
+      });
     } catch (error: any) {
       console.error("Transcription error:", error);
       const status = error.status || 500;
@@ -217,12 +255,14 @@ export async function startServer(): Promise<number> {
     }
   });
 
-  app.post("/api/analyze", async (req, res) => {
+  app.post("/api/analyze", quotaMiddleware('chat'), async (req: express.Request, res) => {
     try {
-      const customKey = req.headers['x-api-key'] as string;
-      const customModel = req.headers['x-model'] as string;
-      const persona = req.headers['x-persona'] as string || 'Technical Interviewer';
-      const mode = req.headers['x-mode'] as string || 'voice';
+      const authReq = req as AuthRequest;
+      
+      const customKey = (req.headers['x-api-key'] as string) || '';
+      const customModel = (req.headers['x-model'] as string) || '';
+      const persona = (req.headers['x-persona'] as string) || 'Technical Interviewer';
+      const mode = (req.headers['x-mode'] as string) || 'voice';
       const groq = getGroq(customKey);
 
       const supportsLogprobs = (model: string) => {
@@ -502,6 +542,11 @@ Return ONLY valid JSON: {"valid": boolean, "issues": ["issue description"], "imp
           });
         }
 
+        // Record chat usage if user authenticated
+        if (authReq.user) {
+          await recordChatUsage(authReq.user.userId, 1);
+        }
+
         return res.json({
           isQuestion: true,
           question: transcript,
@@ -632,6 +677,11 @@ Return ONLY JSON.`;
         if (voiceData.isQuestion && voiceData.confidence < 0.2) {
            console.log(`[Voice] Rejected question due to low confidence (< 0.2)`);
            voiceData.isQuestion = false;
+        }
+        
+        // Record chat usage if user authenticated (voice mode also counts as chat message)
+        if (authReq.user) {
+          await recordChatUsage(authReq.user.userId, 1);
         }
         
         return res.json(voiceData);
@@ -778,6 +828,219 @@ RULES:
     }
   });
 
+  // GET /api/usage — Get user's current usage + remaining quotas
+  app.get('/api/usage', async (req: express.Request, res) => {
+    try {
+      const authReq = req as AuthRequest;
+      
+      if (!authReq.user) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+      const { getUserFromDB, resetMonthlyUsageIfNeeded, calculateTrialDaysRemaining, checkTrialExpired } = await import('./server/lib/usageStorage');
+      const user = await getUserFromDB(authReq.user.userId);
+
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      resetMonthlyUsageIfNeeded(user);
+      const planConfig = PLAN_LIMITS[user.plan];
+
+      const response = {
+        user: {
+          userId: user.userId,
+          email: user.email,
+          plan: user.plan,
+          subscriptionStatus: user.subscriptionStatus,
+        },
+        quotas: {
+          voiceMinutes: {
+            used: user.voiceMinutesUsed,
+            limit: planConfig.voiceMinutesPerMonth,
+            remaining: Math.max(0, planConfig.voiceMinutesPerMonth - user.voiceMinutesUsed),
+            percentUsed: (user.voiceMinutesUsed / planConfig.voiceMinutesPerMonth) * 100,
+          },
+          chatMessages: {
+            used: user.chatMessagesUsed,
+            limit: planConfig.chatMessagesPerMonth,
+            remaining: Math.max(0, planConfig.chatMessagesPerMonth - user.chatMessagesUsed),
+            percentUsed: (user.chatMessagesUsed / planConfig.chatMessagesPerMonth) * 100,
+          },
+          sessions: {
+            used: user.sessionsUsed,
+            limit: planConfig.sessionsPerMonth,
+            remaining: Math.max(0, planConfig.sessionsPerMonth - user.sessionsUsed),
+            percentUsed: (user.sessionsUsed / planConfig.sessionsPerMonth) * 100,
+          },
+        },
+        features: planConfig.features,
+        currentMonth: user.currentMonth,
+        trialDaysRemaining: user.plan === 'free' && !checkTrialExpired(user) ? calculateTrialDaysRemaining(user) : 0,
+      };
+
+      // Prevent browser caching to ensure real-time quota updates
+      res.set({
+        'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+      });
+
+      res.json(response);
+    } catch (error) {
+      console.error('Usage endpoint error:', error);
+      res.status(500).json({ error: 'Failed to fetch usage data' });
+    }
+  });
+
+  // POST /api/upgrade — Upgrade user plan
+  app.post('/api/upgrade', async (req: express.Request, res) => {
+    try {
+      const authReq = req as AuthRequest;
+      
+      if (!authReq.user) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+      const { newPlan } = req.body;
+      if (!['basic', 'pro', 'enterprise'].includes(newPlan)) {
+        return res.status(400).json({ error: 'Invalid plan' });
+      }
+
+      const upgraded = await upgradeUserPlan(authReq.user.userId, newPlan);
+      if (!upgraded) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      res.json({
+        message: `Successfully upgraded to ${newPlan} plan`,
+        user: { plan: upgraded.plan },
+      });
+    } catch (error) {
+      console.error('Upgrade endpoint error:', error);
+      res.status(500).json({ error: 'Failed to upgrade plan' });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════
+  // SESSION MANAGEMENT ENDPOINTS
+  // ════════════════════════════════════════════════════════════════
+
+  // POST /api/sessions/start — Create new interview session
+  app.post('/api/sessions/start', async (req: express.Request, res) => {
+    try {
+      const authReq = req as AuthRequest;
+      
+      if (!authReq.user) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+      const { createSession } = await import('./server/lib/usageStorage');
+      const sessionId = await createSession(authReq.user.userId);
+
+      if (!sessionId) {
+        return res.status(500).json({ error: 'Failed to create session' });
+      }
+
+      res.json({
+        sessionId,
+        message: `Session started: ${sessionId}`,
+      });
+    } catch (error: any) {
+      console.error('[Session] Failed to start session:', error.message);
+      res.status(500).json({ error: 'Failed to start session' });
+    }
+  });
+
+  // PUT /api/sessions/:sessionId — Update session with question count
+  app.put('/api/sessions/:sessionId', async (req: express.Request, res) => {
+    try {
+      const authReq = req as AuthRequest;
+      const { sessionId } = req.params;
+      const { questionsAsked, voiceMinutesUsed } = req.body;
+
+      if (!authReq.user || !sessionId) {
+        return res.status(401).json({ error: 'User not authenticated or missing session ID' });
+      }
+
+      const { updateSession } = await import('./server/lib/usageStorage');
+      await updateSession(sessionId, questionsAsked || 0, voiceMinutesUsed || 0);
+
+      res.json({
+        sessionId,
+        message: `Session updated: ${questionsAsked} questions asked`,
+      });
+    } catch (error: any) {
+      console.error('[Session] Failed to update session:', error.message);
+      res.status(500).json({ error: 'Failed to update session' });
+    }
+  });
+
+  // PUT /api/sessions/:sessionId/close — Close/complete session
+  app.put('/api/sessions/:sessionId/close', async (req: express.Request, res) => {
+    try {
+      const authReq = req as AuthRequest;
+      const { sessionId } = req.params;
+      const { status } = req.body; // 'completed' or 'abandoned'
+
+      if (!authReq.user || !sessionId) {
+        return res.status(401).json({ error: 'User not authenticated or missing session ID' });
+      }
+
+      const finalStatus = (status === 'completed' || status === 'abandoned') ? status : 'completed';
+
+      const { closeSession } = await import('./server/lib/usageStorage');
+      await closeSession(sessionId, finalStatus);
+
+      res.json({
+        sessionId,
+        status: finalStatus,
+        message: `Session closed: ${finalStatus}`,
+      });
+    } catch (error: any) {
+      console.error('[Session] Failed to close session:', error.message);
+      res.status(500).json({ error: 'Failed to close session' });
+    }
+  });
+
+  // GET /api/sessions/active — Get all currently active sessions (admin/monitoring)
+  app.get('/api/sessions/active', async (req: express.Request, res) => {
+    try {
+      const { getActiveSessions } = await import('./server/lib/usageStorage');
+      const activeSessions = await getActiveSessions();
+
+      res.json({
+        count: activeSessions.length,
+        sessions: activeSessions,
+      });
+    } catch (error: any) {
+      console.error('[Session] Failed to fetch active sessions:', error.message);
+      res.status(500).json({ error: 'Failed to fetch active sessions' });
+    }
+  });
+
+  // GET /api/sessions/history — Get user's past session history
+  app.get('/api/sessions/history', async (req: express.Request, res) => {
+    try {
+      const authReq = req as AuthRequest;
+      
+      if (!authReq.user) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+      const { getUserSessionHistory } = await import('./server/lib/usageStorage');
+      const history = await getUserSessionHistory(authReq.user.userId);
+
+      res.json({
+        userId: authReq.user.userId,
+        sessionCount: history.length,
+        sessions: history,
+      });
+    } catch (error: any) {
+      console.error('[Session] Failed to fetch session history:', error.message);
+      res.status(500).json({ error: 'Failed to fetch session history' });
+    }
+  });
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {

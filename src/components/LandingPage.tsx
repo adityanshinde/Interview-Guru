@@ -584,25 +584,11 @@ export default function LandingPage() {
               <h3>Windows Desktop</h3>
               <p>Standalone .exe for maximum power. Captures system audio from Zoom, Teams, Slack — any app.</p>
               <a
-                href="https://github.com/adityanshinde/Parakeet-AI-Clone/releases/latest/download/InterviewGuru-Setup.exe"
+                href="https://github.com/adityanshinde/Interview-Guru/releases/download/v1.0.0/InterviewGuru.exe"
                 className="btn btn-secondary"
                 style={{ display: 'block', textAlign: 'center' }}
               >
                 ⬇ Download .exe
-              </a>
-            </div>
-            <div className="download-card reveal">
-              <div className="download-card-icon">🚀</div>
-              <h3>Self-Hosted</h3>
-              <p>Deploy on your own servers. Full control, privacy, and customization options for teams.</p>
-              <a
-                href="https://github.com/adityanshinde/Parakeet-AI-Clone"
-                className="btn btn-secondary"
-                target="_blank"
-                rel="noreferrer"
-                style={{ display: 'block', textAlign: 'center' }}
-              >
-                View on GitHub
               </a>
             </div>
           </div>
