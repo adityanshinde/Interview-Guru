@@ -40,8 +40,8 @@ var init_planLimits = __esm({
         currency: "USD",
         billingPeriod: "one-time",
         trialDays: 7,
-        voiceMinutesPerMonth: 10,
-        chatMessagesPerMonth: 1e3,
+        voiceMinutesPerMonth: 20,
+        chatMessagesPerMonth: 20,
         sessionsPerMonth: 1,
         features: {
           textToSpeech: false,
@@ -176,32 +176,6 @@ var init_database = __esm({
   }
 });
 
-// server/lib/cache.ts
-function getFromCache(userId) {
-  const cached = userCache.get(userId);
-  if (!cached) return null;
-  const lastSync = lastSyncTime.get(userId) || 0;
-  const isStale = Date.now() - lastSync > CACHE_TTL;
-  if (isStale) {
-    console.log(`[Cache] TTL expired for user ${userId.substring(0, 20)}... (${Math.round((Date.now() - lastSync) / 1e3)}s old)`);
-    return null;
-  }
-  return cached;
-}
-function setInCache(userId, user) {
-  userCache.set(userId, { ...user });
-  lastSyncTime.set(userId, Date.now());
-  console.log(`[Cache] \u2713 Cached user ${userId.substring(0, 20)}...`);
-}
-var userCache, lastSyncTime, CACHE_TTL;
-var init_cache = __esm({
-  "server/lib/cache.ts"() {
-    userCache = /* @__PURE__ */ new Map();
-    lastSyncTime = /* @__PURE__ */ new Map();
-    CACHE_TTL = 5 * 60 * 1e3;
-  }
-});
-
 // server/lib/usageStorage.ts
 var usageStorage_exports = {};
 __export(usageStorage_exports, {
@@ -221,11 +195,6 @@ __export(usageStorage_exports, {
   upgradeUserPlan: () => upgradeUserPlan
 });
 async function getUserFromDB(userId) {
-  const cached = getFromCache(userId);
-  if (cached) {
-    console.log(`[DB] \u2713 User loaded from cache: ${userId.substring(0, 20)}...`);
-    return cached;
-  }
   try {
     const query = `
       SELECT 
@@ -254,8 +223,7 @@ async function getUserFromDB(userId) {
         createdAt: new Date(row.created_at).getTime(),
         lastActiveAt: new Date(row.last_active_at).getTime()
       };
-      setInCache(userId, user);
-      console.log(`[DB] \u2713 User loaded from Neon: ${userId.substring(0, 20)}...`);
+      console.log(`[DB] \u2713 User loaded: ${userId.substring(0, 20)}...`);
       return user;
     }
   } catch (error) {
@@ -305,7 +273,6 @@ async function createUserInDB(userId, email) {
       new Date(user.lastActiveAt)
     ];
     await executeDatabase(query, params);
-    setInCache(userId, user);
     console.log(`[DB] \u2713 User created: ${userId.substring(0, 20)}...`);
     return user;
   } catch (error) {
@@ -465,7 +432,6 @@ async function recordChatUsage(userId, chatCount = 1) {
       increment: chatCount,
       monthReset: monthChanged
     });
-    setInCache(userId, user);
     console.log(`[Usage] \u2713 Chat usage recorded: ${user.chatMessagesUsed}/${PLAN_LIMITS[user.plan].chatMessagesPerMonth}`);
   } catch (error) {
     console.error("[Usage] \u2717 Failed to record chat usage:", error.message);
@@ -506,7 +472,6 @@ async function recordVoiceUsage(userId, voiceMinutes) {
       increment: voiceMinutes,
       monthReset: monthChanged
     });
-    setInCache(userId, user);
     console.log(`[Usage] \u2713 Voice usage recorded: ${user.voiceMinutesUsed}/${PLAN_LIMITS[user.plan].voiceMinutesPerMonth} minutes`);
   } catch (error) {
     console.error("[Usage] \u2717 Failed to record voice usage:", error.message);
@@ -571,7 +536,6 @@ async function upgradeUserPlan(userId, newPlan) {
       new_plan: newPlan,
       quotas_reset: true
     });
-    setInCache(userId, user);
     console.log(`[DB] \u2713 User upgraded to plan: ${newPlan}`);
     return user;
   } catch (error) {
@@ -583,7 +547,6 @@ var init_usageStorage = __esm({
   "server/lib/usageStorage.ts"() {
     init_planLimits();
     init_database();
-    init_cache();
   }
 });
 

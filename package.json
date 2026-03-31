@@ -9,7 +9,7 @@
     "start": "tsx server.ts",
     "build:ui": "vite build",
     "build:server": "tsup server.ts --format cjs --out-dir .",
-    "build": "npm-run-all build:ui build:server",
+    "build": "npm run build:ui && npm run build:server",
     "preview": "vite preview",
     "clean": "powershell -Command \"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue dist,release,server.cjs\"",
     "lint": "tsc --noEmit",
