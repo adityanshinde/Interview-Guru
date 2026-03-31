@@ -98,6 +98,20 @@ export async function startServer(): Promise<number> {
     next();
   });
 
+  // ✅ CSP Headers for Clerk CAPTCHA support
+  app.use((req, res, next) => {
+    res.header('Content-Security-Policy', 
+      "default-src 'self' https:; " +
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com https://cdn.jsdelivr.net https://js.clerk.com; " +
+      "frame-src 'self' https://challenges.cloudflare.com https://js.clerk.com; " +
+      "connect-src 'self' https: wss: blob:; " +
+      "style-src 'self' 'unsafe-inline' https:; " +
+      "img-src 'self' https: data: blob:; " +
+      "font-src 'self' https: data:;"
+    );
+    next();
+  });
+
   // Apply auth middleware to /api routes
   app.use('/api', authMiddleware);
 
