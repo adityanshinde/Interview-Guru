@@ -1,7 +1,7 @@
 {
   "name": "react-example",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -11,7 +11,7 @@
     "build:server": "tsup server.ts --format cjs --out-dir .",
     "build": "npm-run-all build:ui build:server",
     "preview": "vite preview",
-    "clean": "rm -rf dist release server.cjs",
+    "clean": "powershell -Command \"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue dist,release,server.cjs\"",
     "lint": "tsc --noEmit",
     "electron:dev": "node electron-dev.cjs",
     "predist": "taskkill /F /IM InterviewGuru.exe 2>nul || exit 0",

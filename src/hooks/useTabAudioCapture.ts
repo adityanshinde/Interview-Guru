@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { useAuth } from '@clerk/react';
+import { API_ENDPOINT } from '../config';
 
 export function useTabAudioCapture(onTranscriptUpdate: (text: string) => void, onError?: (msg: string) => void) {
   const { getToken } = useAuth();
@@ -101,7 +102,7 @@ export function useTabAudioCapture(onTranscriptUpdate: (text: string) => void, o
                 const voiceModel = localStorage.getItem('groq_voice_model') || 'whisper-large-v3-turbo';
                 const token = await getToken();
 
-                const response = await fetch('/api/transcribe', {
+                const response = await fetch(API_ENDPOINT('/api/transcribe'), {
                   method: 'POST',
                   headers: {
                     'Content-Type': 'application/json',

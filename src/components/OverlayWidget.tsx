@@ -12,6 +12,7 @@ import { usePlanStatus } from '../hooks/usePlanStatus';
 import { useSessionTracking } from '../hooks/useSessionTracking';
 import { UsageBar } from './UsageBar';
 import { PlanBanner } from './PlanBanner';
+import { API_ENDPOINT } from '../config';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -145,7 +146,13 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
 }
 
 // ── Collapsible section ───────────────────────────────────
-function SectionBlock({ section, isLatest, si }: { section: Section; isLatest: boolean; si: number }) {
+interface SectionBlockProps {
+  section: Section;
+  isLatest: boolean;
+  si: number;
+}
+
+const SectionBlock: React.FC<SectionBlockProps> = ({ section, isLatest, si }) => {
   const [open, setOpen] = useState(false);
   const icon = sectionIcon(section.title);
   const hasContent = !!(section.content || (section.points && section.points.length > 0));
@@ -175,7 +182,7 @@ function SectionBlock({ section, isLatest, si }: { section: Section; isLatest: b
       )}
     </div>
   );
-}
+};
 
 
 // ── Typing effect hook ────────────────────────────────────
@@ -198,16 +205,18 @@ function useTypingEffect(text: string, speed = 18, active = true) {
 }
 
 // ── ChatMessage (conversational bubble pair) ───────────────
-function ChatMessage({
-  item, index, onCopy, onRefine, animatedIds, onAnimationDone,
-}: {
+interface ChatMessageProps {
   item: HistoryItem;
   index: number;
   onCopy: (text: string) => void;
   onRefine?: (type: 'shorter' | 'examples') => void | Promise<void>;
   animatedIds: React.MutableRefObject<Set<string>>;
   onAnimationDone: (id: string) => void;
-}) {
+}
+
+const ChatMessage: React.FC<ChatMessageProps> = ({
+  item, index, onCopy, onRefine, animatedIds, onAnimationDone,
+}) => {
   const isLatest = index === 0;
   const [feedback, setFeedback] = useState<'up' | 'down' | null>(null);
 
@@ -331,7 +340,7 @@ function ChatMessage({
       </div>
     </div>
   );
-}
+};
 
 // ── Main Widget ───────────────────────────────────────────
 export default function OverlayWidget() {
@@ -587,7 +596,7 @@ export default function OverlayWidget() {
     setIsGenerating(true); setGenerateResult(null);
     try {
       const token = await getToken();
-      const res = await fetch('/api/generate-cache', {
+      const res = await fetch(API_ENDPOINT('/api/generate-cache'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

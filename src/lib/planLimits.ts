@@ -20,8 +20,8 @@ export const PLAN_LIMITS: Record<PlanTier, PlanConfig> = {
     currency: 'USD',
     billingPeriod: 'one-time',
     trialDays: 7,
-    voiceMinutesPerMonth: 10,
-    chatMessagesPerMonth: 1000,
+    voiceMinutesPerMonth: 20,
+    chatMessagesPerMonth: 20,
     sessionsPerMonth: 1,
     features: {
       textToSpeech: false,

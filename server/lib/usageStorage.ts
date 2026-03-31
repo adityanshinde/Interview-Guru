@@ -1,7 +1,6 @@
 import { UserRecord, SessionRecord } from '../../src/lib/types.js';
 import { PlanTier, PLAN_LIMITS } from '../../src/lib/planLimits.js';
 import { queryDatabase, queryDatabaseSingle, executeDatabase } from './database.js';
-import { getFromCache, setInCache, invalidateCache } from './cache.js';
 
 /**
  * Usage Storage - Neon-First Architecture
@@ -13,14 +12,7 @@ import { getFromCache, setInCache, invalidateCache } from './cache.js';
  */
 
 export async function getUserFromDB(userId: string): Promise<UserRecord | null> {
-  // Check cache first
-  const cached = getFromCache(userId);
-  if (cached) {
-    console.log(`[DB] ✓ User loaded from cache: ${userId.substring(0, 20)}...`);
-    return cached;
-  }
-
-  // Load from Neon
+  // Load from Neon (source of truth)
   try {
     const query = `
       SELECT 
@@ -50,10 +42,7 @@ export async function getUserFromDB(userId: string): Promise<UserRecord | null> 
         createdAt: new Date(row.created_at).getTime(),
         lastActiveAt: new Date(row.last_active_at).getTime(),
       };
-
-      // Cache it for future reads
-      setInCache(userId, user);
-      console.log(`[DB] ✓ User loaded from Neon: ${userId.substring(0, 20)}...`);
+      console.log(`[DB] ✓ User loaded: ${userId.substring(0, 20)}...`);
       return user;
     }
   } catch (error: any) {
@@ -109,8 +98,6 @@ export async function createUserInDB(userId: string, email: string): Promise<Use
     ];
     
     await executeDatabase(query, params);
-
-    setInCache(userId, user);
     console.log(`[DB] ✓ User created: ${userId.substring(0, 20)}...`);
     return user;
   } catch (error: any) {
@@ -329,8 +316,7 @@ export async function recordChatUsage(userId: string, chatCount: number = 1): Pr
       monthReset: monthChanged
     });
 
-    // Update cache
-    setInCache(userId, user);
+    // Update database
     console.log(`[Usage] ✓ Chat usage recorded: ${user.chatMessagesUsed}/${PLAN_LIMITS[user.plan].chatMessagesPerMonth}`);
   } catch (error: any) {
     console.error('[Usage] ✗ Failed to record chat usage:', error.message);
@@ -386,8 +372,7 @@ export async function recordVoiceUsage(userId: string, voiceMinutes: number): Pr
       monthReset: monthChanged
     });
 
-    // Update cache
-    setInCache(userId, user);
+    // Update database
     console.log(`[Usage] ✓ Voice usage recorded: ${user.voiceMinutesUsed}/${PLAN_LIMITS[user.plan].voiceMinutesPerMonth} minutes`);
   } catch (error: any) {
     console.error('[Usage] ✗ Failed to record voice usage:', error.message);
@@ -469,8 +454,6 @@ export async function upgradeUserPlan(userId: string, newPlan: PlanTier): Promis
       quotas_reset: true
     });
 
-    // Update cache
-    setInCache(userId, user);
     console.log(`[DB] ✓ User upgraded to plan: ${newPlan}`);
     return user;
   } catch (error: any) {

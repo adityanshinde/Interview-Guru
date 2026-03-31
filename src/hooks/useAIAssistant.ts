@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useAuth } from '@clerk/react';
 import { GoogleGenAI, Modality } from "@google/genai";
+import { API_ENDPOINT } from '../config';
 
 export interface Answer {
   bullets: string[];
@@ -149,7 +150,7 @@ export function useAIAssistant(onQuestionDetected?: () => void, onError?: (msg: 
         const resume = localStorage.getItem('groq_resume') || '';
         const jd = localStorage.getItem('groq_jd') || '';
 
-        const response = await fetch('/api/analyze', {
+        const response = await fetch(API_ENDPOINT('/api/analyze'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -229,7 +230,7 @@ export function useAIAssistant(onQuestionDetected?: () => void, onError?: (msg: 
       const resume = localStorage.getItem('groq_resume') || '';
       const jd = localStorage.getItem('groq_jd') || '';
 
-      const response = await fetch('/api/analyze', {
+      const response = await fetch(API_ENDPOINT('/api/analyze'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

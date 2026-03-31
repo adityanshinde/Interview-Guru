@@ -124,20 +124,15 @@ function initializeDatabase() {
       rejectUnauthorized: false
     },
     max: 10,
-    // Increase from 1 to 10 for better concurrency
-    min: 2,
-    // Keep 2 connections open
+    min: 1,
     idleTimeoutMillis: 3e4,
-    // 30 seconds (was 10s, too aggressive)
     connectionTimeoutMillis: 1e4,
-    // 10 seconds (increased from 5s)
     statement_timeout: 3e4,
-    // 30 second statement timeout
     query_timeout: 3e4
   });
-  pool.query("SELECT NOW()", (err, res) => {
+  pool.query("SELECT NOW()", (err) => {
     if (err) {
-      console.error("[DB] \u274C Initial connection test failed:", err.message);
+      console.error("[DB] \u274C Connection test failed:", err.message);
       isConnected = false;
       return;
     }
@@ -145,8 +140,10 @@ function initializeDatabase() {
     isConnected = true;
   });
   pool.on("error", (err) => {
-    console.error("[DB] \u274C Unexpected pool error:", err.message);
-    isConnected = false;
+    console.error("[DB] \u26A0\uFE0F Pool error:", err.message);
+  });
+  pool.on("connect", () => {
+    console.log("[DB] \u2139\uFE0F New connection established");
   });
   return pool;
 }
@@ -267,7 +264,6 @@ async function getUserFromDB(userId) {
   return null;
 }
 async function createUserInDB(userId, email) {
-  console.log(`[DB] createUserInDB called with userId: ${userId}, email: ${email}`);
   const now = Date.now();
   const currentMonth = (/* @__PURE__ */ new Date()).toISOString().slice(0, 7);
   const user = {
@@ -308,16 +304,12 @@ async function createUserInDB(userId, email) {
       new Date(user.createdAt),
       new Date(user.lastActiveAt)
     ];
-    console.log(`[DB] Executing INSERT with query: ${query.substring(0, 100)}...`);
-    console.log(`[DB] Parameters: user_id=${params[0]}, email=${params[1]}, plan=${params[2]}`);
-    const result = await executeDatabase(query, params);
-    console.log(`[DB] INSERT execute returned: ${JSON.stringify(result)}`);
+    await executeDatabase(query, params);
     setInCache(userId, user);
-    console.log(`[DB] \u2713 New user created and cached: ${userId.substring(0, 20)}...`);
+    console.log(`[DB] \u2713 User created: ${userId.substring(0, 20)}...`);
     return user;
   } catch (error) {
-    console.error("[DB] \u274C Error creating user:", error.message);
-    console.error("[DB] Stack trace:", error.stack);
+    console.error("[DB] Error creating user:", error.message);
     throw error;
   }
 }
@@ -629,22 +621,18 @@ var authMiddleware = async (req, res, next) => {
     }
     const clerkUserId = decoded.sub;
     console.log(`[Auth] Clerk user ID: ${clerkUserId}, email: ${decoded.email}`);
-    console.log(`[Auth] Loading user from DB: ${clerkUserId}`);
     let userRecord = await getUserFromDB(clerkUserId);
-    console.log(`[Auth] getUserFromDB result: ${userRecord ? "FOUND" : "NOT FOUND"}`);
     if (!userRecord) {
-      console.log(`[Auth] \u26A0\uFE0F  First-time user, creating record...`);
       try {
         userRecord = await createUserInDB(clerkUserId, decoded.email || "");
-        console.log(`[Auth] \u2713 User record created: plan=${userRecord.plan}, id=${userRecord.userId.substring(0, 20)}...`);
+        console.log(`[Auth] \u2713 New user: ${clerkUserId.substring(0, 20)}...`);
       } catch (createErr) {
-        console.error(`[Auth] \u274C Failed to create user: ${createErr.message}`);
+        console.error(`[Auth] \u2717 Failed to create user: ${createErr.message}`);
         throw createErr;
       }
     } else {
-      console.log(`[Auth] \u2713 Existing user found: email=${userRecord.email || "(no email)"}, plan=${userRecord.plan}`);
       if (userRecord.plan === "free" && checkTrialExpired(userRecord)) {
-        console.log(`[Auth] \u2717 Trial expired for user: ${userRecord.email}`);
+        console.log(`[Auth] \u2717 Trial expired: ${userRecord.email}`);
         res.status(402).json({
           error: "Free trial expired",
           action: "upgrade",
@@ -768,7 +756,13 @@ import_dotenv.default.config();
 console.log("[Server] Initializing database pool...");
 var dbPool = initializeDatabase();
 console.log("[Server] Database pool initialized");
+var serverStarted = false;
 async function startServer() {
+  if (serverStarted) {
+    console.log("[Server] \u2139\uFE0F  Server already started");
+    return parseInt(process.env.PORT || "3000");
+  }
+  serverStarted = true;
   const app = (0, import_express.default)();
   let initialPort = process.env.PORT ? parseInt(process.env.PORT) : 3e3;
   const httpServer = (0, import_http.createServer)(app);
@@ -1486,31 +1480,21 @@ Job Context: ${jd.substring(0, 1e3)}` }
   app.post("/api/sessions/start", async (req, res) => {
     try {
       const authReq = req;
-      console.log("[API] POST /api/sessions/start called");
-      console.log("[API] User:", authReq.user?.userId || "NOT AUTHENTICATED");
-      console.log("[API] Request body:", JSON.stringify(req.body, null, 2));
       if (!authReq.user) {
-        console.error("[API] \u274C User not authenticated");
         return res.status(401).json({ error: "User not authenticated" });
       }
       const { createSession: createSession2 } = await Promise.resolve().then(() => (init_usageStorage(), usageStorage_exports));
-      console.log("[API] Calling createSession with userId:", authReq.user.userId);
       const sessionId = await createSession2(authReq.user.userId);
-      console.log("[API] createSession returned:", sessionId);
       if (!sessionId) {
-        console.error("[API] \u274C Failed to create session (null returned)");
         return res.status(500).json({ error: "Failed to create session" });
       }
-      console.log("[API] \u2713 Session created successfully:", sessionId);
       res.json({
         sessionId,
         message: `Session started: ${sessionId}`
       });
     } catch (error) {
-      console.error("[API] \u274C Error in POST /api/sessions/start:");
-      console.error("[API] Error message:", error.message);
-      console.error("[API] Stack:", error.stack);
-      res.status(500).json({ error: "Failed to start session", details: error.message });
+      console.error("[Session] Failed to start session:", error.message);
+      res.status(500).json({ error: "Failed to start session" });
     }
   });
   app.put("/api/sessions/:sessionId", async (req, res) => {

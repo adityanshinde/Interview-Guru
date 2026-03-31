@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { useAuth } from '@clerk/react';
+import { API_ENDPOINT } from '../config';
 
 export interface SessionQuestion {
   question: string;
@@ -27,7 +28,7 @@ export function useSessionTracking() {
         return null;
       }
       
-      const response = await fetch('/api/sessions/start', {
+      const response = await fetch(API_ENDPOINT('/api/sessions/start'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -81,7 +82,7 @@ export function useSessionTracking() {
     try {
       const token = await getToken();
       
-      const response = await fetch(`/api/sessions/${sessionId}`, {
+      const response = await fetch(API_ENDPOINT(`/api/sessions/${sessionId}`), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -116,7 +117,7 @@ export function useSessionTracking() {
     try {
       const token = await getToken();
       
-      const response = await fetch(`/api/sessions/${sessionId}/close`, {
+      const response = await fetch(API_ENDPOINT(`/api/sessions/${sessionId}/close`), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',

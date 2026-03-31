@@ -1,6 +1,7 @@
 import { useAuth } from '@clerk/react';
 import { useEffect, useState, useCallback } from 'react';
 import { PlanTier } from '../lib/planLimits';
+import { API_ENDPOINT } from '../config';
 
 export interface UsageQuota {
   voiceMinutes: { used: number; limit: number; remaining: number; percentUsed: number };
@@ -40,7 +41,7 @@ export function usePlanStatus(): PlanStatus {
 
       // Add timestamp to query string to force fresh data (cache-busting)
       const timestamp = new Date().getTime();
-      const response = await fetch(`/api/usage?t=${timestamp}`, {
+      const response = await fetch(API_ENDPOINT(`/api/usage?t=${timestamp}`), {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${token}`,
