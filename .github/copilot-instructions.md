@@ -1775,7 +1775,719 @@ const handlePersonaChange = (newPersona: string) => {
 
 ---
 
-## 🔧 Common Development Scenarios
+## � Pricing Plan System (Clerk-Based)
+
+### **Overview**
+
+InterviewGuru implements a **freemium model** with usage-based quota enforcement via Clerk authentication + backend middleware. Users are divided into plan tiers (Free, Basic, Pro, Enterprise) with specific limits on voice minutes, chat messages, and interview sessions.
+
+**Key Architecture**:
+- **Frontend Auth**: Clerk (`@clerk/react`, `useAuth()` hook for JWT)
+- **Backend Auth**: Express middleware verifying Clerk JWT tokens
+- **Usage Tracking**: File-based persistence (`~/.interviewguru/users.json`) for MVP; scale to PostgreSQL for production
+- **Quota Enforcement**: Per-user, per-month limits with automatic reset on month change
+- **Payment**: Stripe/Paddle integration (future) to upgrade plan tier
+
+---
+
+### **Plan Tier Definitions**
+
+```typescript
+// src/lib/planLimits.ts
+
+export type PlanTier = 'free' | 'basic' | 'pro' | 'enterprise';
+
+export const PLAN_LIMITS: Record<PlanTier, PlanConfig> = {
+  free: {
+    name: 'Free Trial',
+    price: 0,
+    currency: 'USD',
+    billingPeriod: 'one-time',
+    trialDays: 7,
+    
+    // Usage limits per month
+    voiceMinutesPerMonth: 10,
+    chatMessagesPerMonth: 10,
+    sessionsPerMonth: 1,
+    
+    // Feature access
+    features: {
+      textToSpeech: false,
+      sessionExport: false,
+      customPersonas: false,
+      cacheGeneration: false,
+      advancedAnalytics: false,
+    },
+    
+    notes: '7-day free trial, then basic quotas',
+  },
+  
+  basic: {
+    name: 'Basic',
+    price: 9.99,
+    currency: 'USD',
+    billingPeriod: 'month',
+    
+    voiceMinutesPerMonth: 60,
+    chatMessagesPerMonth: 500,
+    sessionsPerMonth: 1,  // One interview session active at a time
+    
+    features: {
+      textToSpeech: true,
+      sessionExport: false,
+      customPersonas: false,
+      cacheGeneration: true,
+      advancedAnalytics: false,
+    },
+    
+    notes: 'Essential for regular interview prep',
+  },
+  
+  pro: {
+    name: 'Professional',
+    price: 29.99,
+    currency: 'USD',
+    billingPeriod: 'month',
+    
+    voiceMinutesPerMonth: 600,
+    chatMessagesPerMonth: 5000,
+    sessionsPerMonth: 10,  // 10 concurrent sessions
+    
+    features: {
+      textToSpeech: true,
+      sessionExport: true,
+      customPersonas: true,
+      cacheGeneration: true,
+      advancedAnalytics: true,
+    },
+    
+    notes: 'For power users prepping for multiple interviews',
+  },
+  
+  enterprise: {
+    name: 'Enterprise',
+    price: null,  // Custom pricing
+    currency: 'USD',
+    billingPeriod: 'year',
+    
+    voiceMinutesPerMonth: 99999,  // Unlimited
+    chatMessagesPerMonth: 99999,
+    sessionsPerMonth: 99999,
+    
+    features: {
+      textToSpeech: true,
+      sessionExport: true,
+      customPersonas: true,
+      cacheGeneration: true,
+      advancedAnalytics: true,
+    },
+    
+    notes: 'Custom terms, dedicated support',
+  },
+};
+
+export interface PlanConfig {
+  name: string;
+  price: number | null;
+  currency: string;
+  billingPeriod: 'one-time' | 'month' | 'year';
+  trialDays?: number;
+  voiceMinutesPerMonth: number;
+  chatMessagesPerMonth: number;
+  sessionsPerMonth: number;
+  features: Record<string, boolean>;
+  notes: string;
+}
+```
+
+---
+
+### **User Data Model**
+
+```typescript
+// src/lib/types.ts
+
+export interface UserRecord {
+  userId: string;                  // Clerk user ID
+  email: string;
+  plan: PlanTier;
+  trialsUsed: boolean;            // Has user completed 7-day trial?
+  trialStartDate?: number;        // Timestamp of trial start
+  subscriptionStatus: 'active' | 'expired' | 'cancelled' | 'trial';
+  
+  // Monthly usage tracking (reset on month change)
+  currentMonth: string;            // Format: "2024-03"
+  voiceMinutesUsed: number;
+  chatMessagesUsed: number;
+  sessionsUsed: number;
+  
+  // Session tracking
+  activeSessions: string[];        // Session IDs currently active
+  sessionHistory: SessionRecord[];
+  
+  // Metadata
+  createdAt: number;
+  lastActiveAt: number;
+  stripeCustomerId?: string;       // For Stripe integration
+}
+
+export interface SessionRecord {
+  sessionId: string;
+  startTime: number;
+  endTime?: number;
+  questionsAsked: number;
+  voiceMinutesUsed: number;
+  status: 'active' | 'completed' | 'abandoned';
+}
+```
+
+---
+
+### **Backend Auth Middleware**
+
+```typescript
+// server/middleware/authMiddleware.ts
+
+import { Router, Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';  // npm install jsonwebtoken
+
+export interface AuthRequest extends Request {
+  user?: {
+    userId: string;
+    email: string;
+    plan: PlanTier;
+  };
+}
+
+/**
+ * Extract Clerk JWT from Authorization header and verify
+ * For MVP: Use simple jwt-decode (no signature verification)
+ * For production: Implement full JWT signature verification against Clerk keys
+ */
+export async function authMiddleware(
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Missing or invalid authorization header' });
+    }
+
+    const token = authHeader.substring(7);  // Remove "Bearer " prefix
+    
+    // MVP: Simple JWT decode (WARNING: NO signature verification)
+    const decoded = jwt.decode(token) as any;
+    if (!decoded || !decoded.sub) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    // Extract Clerk user ID from 'sub' claim
+    const clerkUserId = decoded.sub;  // Format: "user_XXXXX"
+    
+    // Load user record from storage
+    const users = loadUsers();
+    const userRecord = users.find(u => u.userId === clerkUserId);
+    
+    if (!userRecord) {
+      // First-time user: create default record
+      const newUser = createNewUserRecord(clerkUserId, decoded.email);
+      users.push(newUser);
+      saveUsers(users);
+      
+      req.user = {
+        userId: clerkUserId,
+        email: decoded.email,
+        plan: newUser.plan,
+      };
+    } else {
+      // Check if user's trial has expired
+      if (userRecord.plan === 'free' && userRecord.trialsUsed) {
+        const trialExpired = checkTrialExpired(userRecord);
+        if (trialExpired) {
+          return res.status(402).json({
+            error: 'Free trial expired',
+            action: 'upgrade',
+            message: 'Your 7-day trial has ended. Please upgrade to continue.',
+          });
+        }
+      }
+
+      req.user = {
+        userId: clerkUserId,
+        email: userRecord.email,
+        plan: userRecord.plan,
+      };
+    }
+
+    next();
+  } catch (error) {
+    console.error('Auth middleware error:', error);
+    res.status(500).json({ error: 'Authentication failed' });
+  }
+}
+
+/**
+ * Quota enforcement middleware
+ * Check if user has remaining quota before processing request
+ */
+export async function quotaMiddleware(
+  quotaType: 'voice' | 'chat' | 'session'
+) {
+  return async (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    const users = loadUsers();
+    const user = users.find(u => u.userId === req.user!.userId);
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Reset monthly usage if month has changed
+    resetMonthlyUsageIfNeeded(user);
+
+    const planConfig = PLAN_LIMITS[user.plan];
+    
+    // Check quotas based on request type
+    switch (quotaType) {
+      case 'voice':
+        if (user.voiceMinutesUsed >= planConfig.voiceMinutesPerMonth) {
+          return res.status(402).json({
+            error: 'Voice quota exceeded',
+            quotaUsed: user.voiceMinutesUsed,
+            quotaLimit: planConfig.voiceMinutesPerMonth,
+            message: `Monthly voice limit (${planConfig.voiceMinutesPerMonth}m) reached`,
+          });
+        }
+        break;
+
+      case 'chat':
+        if (user.chatMessagesUsed >= planConfig.chatMessagesPerMonth) {
+          return res.status(402).json({
+            error: 'Chat quota exceeded',
+            quotaUsed: user.chatMessagesUsed,
+            quotaLimit: planConfig.chatMessagesPerMonth,
+            message: `Monthly chat limit (${planConfig.chatMessagesPerMonth}) reached`,
+          });
+        }
+        break;
+
+      case 'session':
+        if (user.sessionsUsed >= planConfig.sessionsPerMonth) {
+          return res.status(402).json({
+            error: 'Session quota exceeded',
+            quotaUsed: user.sessionsUsed,
+            quotaLimit: planConfig.sessionsPerMonth,
+            message: `Monthly session limit (${planConfig.sessionsPerMonth}) reached`,
+          });
+        }
+        break;
+    }
+
+    next();
+  };
+}
+```
+
+---
+
+### **API Endpoint Updates**
+
+```typescript
+// server.ts
+
+import { authMiddleware, quotaMiddleware } from './middleware/authMiddleware';
+
+// Apply auth middleware to all /api routes
+app.use('/api', authMiddleware);
+
+// POST /api/transcribe — Voice-to-text
+app.post('/api/transcribe', quotaMiddleware('voice'), async (req: AuthRequest, res: Response) => {
+  const { audioBase64, mimeType, audioChunkDuration } = req.body;
+  
+  try {
+    // Transcribe with Groq
+    const transcript = await transcribeWithGroq(audioBase64, mimeType);
+    
+    // Record voice usage
+    const voiceMinualizeUsed = Math.ceil((audioChunkDuration || 5) / 60); // Convert to minutes
+    recordVoiceUsage(req.user!.userId, voiceMinutesUsed);
+    
+    res.json({
+      text: transcript,
+      usage: {
+        voiceMinutesUsed,
+        remainingMinutes: getRemainingQuota(req.user!.userId, 'voice'),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Transcription failed' });
+  }
+});
+
+// POST /api/analyze — Question detection + answer generation
+app.post('/api/analyze', quotaMiddleware('chat'), async (req: AuthRequest, res: Response) => {
+  const { question, persona, mode } = req.body;
+  
+  try {
+    // Check vector cache first
+    const cachedAnswer = await checkVectorCache(question);
+    if (cachedAnswer) {
+      res.json({ ...cachedAnswer, cacheHit: true });
+      // Cache hits still count as chat usage
+      recordChatUsage(req.user!.userId, 1);
+      return;
+    }
+
+    // Analyze with Groq LLM pipeline
+    const analysis = await analyzeQuestion(question, persona, mode);
+    
+    // Record chat usage
+    recordChatUsage(req.user!.userId, 1);
+    
+    res.json({
+      ...analysis,
+      usage: {
+        chatsUsed: 1,
+        remainingChats: getRemainingQuota(req.user!.userId, 'chat'),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Analysis failed' });
+  }
+});
+
+// GET /api/usage — Get user's current usage + remaining quotas
+app.get('/api/usage', async (req: AuthRequest, res: Response) => {
+  const users = loadUsers();
+  const user = users.find(u => u.userId === req.user!.userId);
+  
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  resetMonthlyUsageIfNeeded(user);
+  saveUsers(users);
+
+  const planConfig = PLAN_LIMITS[user.plan];
+  
+  res.json({
+    user: {
+      userId: user.userId,
+      email: user.email,
+      plan: user.plan,
+      subscriptionStatus: user.subscriptionStatus,
+    },
+    quotas: {
+      voiceMinutes: {
+        used: user.voiceMinutesUsed,
+        limit: planConfig.voiceMinutesPerMonth,
+        remaining: Math.max(0, planConfig.voiceMinutesPerMonth - user.voiceMinutesUsed),
+        percentUsed: (user.voiceMinutesUsed / planConfig.voiceMinutesPerMonth) * 100,
+      },
+      chatMessages: {
+        used: user.chatMessagesUsed,
+        limit: planConfig.chatMessagesPerMonth,
+        remaining: Math.max(0, planConfig.chatMessagesPerMonth - user.chatMessagesUsed),
+        percentUsed: (user.chatMessagesUsed / planConfig.chatMessagesPerMonth) * 100,
+      },
+      sessions: {
+        used: user.sessionsUsed,
+        limit: planConfig.sessionsPerMonth,
+        remaining: Math.max(0, planConfig.sessionsPerMonth - user.sessionsUsed),
+        percentUsed: (user.sessionsUsed / planConfig.sessionsPerMonth) * 100,
+      },
+    },
+    features: planConfig.features,
+    currentMonth: user.currentMonth,
+    trialDaysRemaining: user.plan === 'free' && user.trialsUsed ? calculateTrialDaysRemaining(user) : 0,
+  });
+});
+
+// POST /api/upgrade — Upgrade plan (future: integrate with Stripe)
+app.post('/api/upgrade', async (req: AuthRequest, res: Response) => {
+  const { newPlan } = req.body;
+  
+  if (!['basic', 'pro', 'enterprise'].includes(newPlan)) {
+    return res.status(400).json({ error: 'Invalid plan' });
+  }
+
+  const users = loadUsers();
+  const user = users.find(u => u.userId === req.user!.userId);
+  
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  // TODO: Integrate with Stripe/Paddle
+  // For now, directly upgrade (demo only)
+  user.plan = newPlan;
+  user.subscriptionStatus = 'active';
+  user.voiceMinutesUsed = 0;  // Reset usage on upgrade
+  user.chatMessagesUsed = 0;
+  user.sessionsUsed = 0;
+  
+  saveUsers(users);
+  
+  res.json({
+    message: `Upgraded to ${newPlan} plan`,
+    user: { plan: user.plan },
+  });
+});
+```
+
+---
+
+### **Frontend Usage Display Components**
+
+```typescript
+// src/components/UsageBar.tsx
+
+interface UsageBarProps {
+  label: string;
+  used: number;
+  limit: number;
+  unit?: string;
+}
+
+export function UsageBar({ label, used, limit, unit = '' }: UsageBarProps) {
+  const percentUsed = (used / limit) * 100;
+  const remaining = Math.max(0, limit - used);
+  
+  // Color indicators
+  let barColor = 'bg-green-500';      // < 50% = green
+  if (percentUsed >= 50) barColor = 'bg-yellow-500';  // 50-80% = yellow
+  if (percentUsed >= 80) barColor = 'bg-red-500';     // > 80% = red
+
+  return (
+    <div className="space-y-1 p-3 bg-slate-900 rounded-lg border border-slate-700">
+      <div className="flex justify-between text-sm">
+        <span className="text-slate-300">{label}</span>
+        <span className="text-slate-400 text-xs">
+          {Math.round(percentUsed)}% used ({used}/{limit}{unit})
+        </span>
+      </div>
+      
+      {/* Progress bar */}
+      <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+        <div
+          className={`h-full transition-all duration-300 ${barColor}`}
+          style={{ width: `${Math.min(100, percentUsed)}%` }}
+        />
+      </div>
+      
+      <div className="text-xs text-slate-500">
+        {remaining}{unit} remaining this month
+      </div>
+    </div>
+  );
+}
+```
+
+```typescript
+// src/components/PlanBanner.tsx
+
+interface PlanBannerProps {
+  plan: PlanTier;
+  trialDaysRemaining: number;
+  onUpgrade: () => void;
+}
+
+export function PlanBanner({ plan, trialDaysRemaining, onUpgrade }: PlanBannerProps) {
+  if (plan === 'free' && trialDaysRemaining > 0) {
+    return (
+      <div className="bg-gradient-to-r from-orange-600/20 to-red-600/20 border border-orange-500/50 rounded-lg p-4 mb-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="font-semibold text-orange-200">Free Trial Active</h3>
+            <p className="text-sm text-orange-100">
+              {trialDaysRemaining} day{trialDaysRemaining !== 1 ? 's' : ''} remaining
+            </p>
+          </div>
+          <button
+            onClick={onUpgrade}
+            className="px-4 py-2 bg-orange-600 hover:bg-orange-500 rounded-lg font-semibold transition"
+          >
+            Upgrade Now
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (plan === 'free') {
+    return (
+      <div className="bg-gradient-to-r from-red-600/20 to-pink-600/20 border border-red-500/50 rounded-lg p-4 mb-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="font-semibold text-red-200">Free Trial Expired</h3>
+            <p className="text-sm text-red-100">Upgrade to continue using InterviewGuru</p>
+          </div>
+          <button
+            onClick={onUpgrade}
+            className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg font-semibold transition"
+          >
+            Upgrade
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-gradient-to-r from-cyan-600/20 to-blue-600/20 border border-cyan-500/50 rounded-lg p-4 mb-4">
+      <div className="text-sm text-cyan-100">
+        You're on the <span className="font-semibold capitalize">{plan}</span> plan
+      </div>
+    </div>
+  );
+}
+```
+
+```typescript
+// src/hooks/usePlanStatus.ts
+
+import { useAuth } from '@clerk/react';
+import { useEffect, useState } from 'react';
+import { PlanTier } from '../lib/planLimits';
+
+interface UsageQuota {
+  voiceMinutes: { used: number; limit: number; remaining: number; percentUsed: number };
+  chatMessages: { used: number; limit: number; remaining: number; percentUsed: number };
+  sessions: { used: number; limit: number; remaining: number; percentUsed: number };
+}
+
+interface PlanStatus {
+  plan: PlanTier;
+  quotas: UsageQuota;
+  trialDaysRemaining: number;
+  features: Record<string, boolean>;
+  loading: boolean;
+  error: string | null;
+}
+
+export function usePlanStatus(): PlanStatus {
+  const { getIdToken } = useAuth();
+  const [status, setStatus] = useState<PlanStatus>({
+    plan: 'free',
+    quotas: {
+      voiceMinutes: { used: 0, limit: 10, remaining: 10, percentUsed: 0 },
+      chatMessages: { used: 0, limit: 10, remaining: 10, percentUsed: 0 },
+      sessions: { used: 0, limit: 1, remaining: 1, percentUsed: 0 },
+    },
+    trialDaysRemaining: 7,
+    features: {},
+    loading: true,
+    error: null,
+  });
+
+  useEffect(() => {
+    const fetchPlanStatus = async () => {
+      try {
+        const token = await getIdToken();
+        
+        const response = await fetch('/api/usage', {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (response.status === 402) {
+          // No remaining quota
+          const data = await response.json();
+          setStatus(prev => ({ ...prev, error: data.message, loading: false }));
+          return;
+        }
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const data = await response.json();
+        setStatus({
+          plan: data.user.plan,
+          quotas: data.quotas,
+          trialDaysRemaining: data.trialDaysRemaining,
+          features: data.features,
+          loading: false,
+          error: null,
+        });
+      } catch (err) {
+        setStatus(prev => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Failed to load plan status',
+          loading: false,
+        }));
+      }
+    };
+
+    fetchPlanStatus();
+    
+    // Refresh plan status every 60 seconds
+    const interval = setInterval(fetchPlanStatus, 60000);
+    return () => clearInterval(interval);
+  }, [getIdToken]);
+
+  return status;
+}
+```
+
+---
+
+### **Update API Calls in useAIAssistant & useTabAudioCapture**
+
+```typescript
+// src/hooks/useAIAssistant.ts — Update fetch calls
+
+const { getIdToken } = useAuth();
+
+// In analyze function:
+const token = await getIdToken();
+const response = await fetch('/api/analyze', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token}`,  // ← Add JWT auth
+    'x-model': model,
+    'x-persona': persona,
+  },
+  body: JSON.stringify({ question, resume, jd, mode }),
+});
+
+if (response.status === 402) {
+  const data = await response.json();
+  setAppAlert({ type: 'error', message: data.message });
+  return;  // Don't process, quota exceeded
+}
+```
+
+---
+
+### **Implementation Checklist**
+
+- [ ] **Step 1**: Add `@clerk/react` usage hooks to frontend (already imported, just use)
+- [ ] **Step 2**: Create `src/lib/planLimits.ts` with plan tier definitions
+- [ ] **Step 3**: Create `src/lib/types.ts` with TypeScript interfaces for UserRecord, SessionRecord
+- [ ] **Step 4**: Create `server/middleware/authMiddleware.ts` with Clerk JWT verification
+- [ ] **Step 5**: Create `server/lib/usageStorage.ts` with file-based persistence (users.json)
+- [ ] **Step 6**: Update `server.ts` to apply authMiddleware + quotaMiddleware to all /api routes
+- [ ] **Step 7**: Add new `/api/usage` and `/api/upgrade` endpoints to server.ts
+- [ ] **Step 8**: Create `src/components/UsageBar.tsx` component
+- [ ] **Step 9**: Create `src/components/PlanBanner.tsx` component
+- [ ] **Step 10**: Create `src/hooks/usePlanStatus.ts` custom hook
+- [ ] **Step 11**: Integrate UsageBar + PlanBanner into `OverlayWidget.tsx`
+- [ ] **Step 12**: Update all API calls in `useAIAssistant.ts` + `useTabAudioCapture.ts` to include JWT auth
+- [ ] **Step 13**: Test free tier limits (10 min voice, 10 chats, 1 session)
+- [ ] **Step 14**: Test plan upgrade flow (from free → basic/pro)
+- [ ] **Step 15** (Future): Integrate Stripe/Paddle webhook for payment processing
+
+---
+
+## �🔧 Common Development Scenarios
 
 ### **I need to add a new chat response section**
 

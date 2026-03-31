@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { useAuth } from '@clerk/react';
 import { GoogleGenAI, Modality } from "@google/genai";
 
 export interface Answer {
@@ -17,6 +18,7 @@ export interface QuestionDetection {
 }
 
 export function useAIAssistant(onQuestionDetected?: () => void, onError?: (msg: string) => void) {
+  const { getToken } = useAuth();
   const [detectedQuestion, setDetectedQuestion] = useState<QuestionDetection | null>(null);
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -139,6 +141,8 @@ export function useAIAssistant(onQuestionDetected?: () => void, onError?: (msg: 
         setIsProcessing(true);
         lastProcessedTextRef.current = currentText;
 
+        // Get Clerk JWT token
+        const token = await getToken();
         const apiKey = localStorage.getItem('groq_api_key') || '';
         const model = localStorage.getItem('groq_model') || 'llama-3.1-8b-instant';
         const persona = localStorage.getItem('groq_persona') || 'Technical Interviewer';
@@ -149,6 +153,7 @@ export function useAIAssistant(onQuestionDetected?: () => void, onError?: (msg: 
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
             'x-api-key': apiKey,
             'x-model': model,
             'x-persona': persona
@@ -159,6 +164,14 @@ export function useAIAssistant(onQuestionDetected?: () => void, onError?: (msg: 
             jd
           })
         });
+
+        if (response.status === 402) {
+          const errData = await response.json();
+          const errorMsg = errData.message || 'Monthly quota exceeded. Please upgrade your plan.';
+          if (onError) onError(errorMsg);
+          setIsProcessing(false);
+          return;
+        }
 
         if (!response.ok) {
           const errData = await response.json();
@@ -209,6 +222,7 @@ export function useAIAssistant(onQuestionDetected?: () => void, onError?: (msg: 
     try {
       setIsProcessing(true);
 
+      const token = await getToken();
       const apiKey = localStorage.getItem('groq_api_key') || '';
       const model = localStorage.getItem('groq_model') || 'llama-3.1-8b-instant';
       const persona = localStorage.getItem('groq_persona') || 'Technical Interviewer';
@@ -219,6 +233,7 @@ export function useAIAssistant(onQuestionDetected?: () => void, onError?: (msg: 
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
           'x-api-key': apiKey,
           'x-model': model,
           'x-persona': persona,
@@ -226,6 +241,14 @@ export function useAIAssistant(onQuestionDetected?: () => void, onError?: (msg: 
         },
         body: JSON.stringify({ transcript: questionText, resume, jd })
       });
+
+      if (response.status === 402) {
+        const errData = await response.json();
+        const errorMsg = errData.message || 'Monthly quota exceeded. Please upgrade your plan.';
+        if (onError) onError(errorMsg);
+        setIsProcessing(false);
+        return;
+      }
 
       if (!response.ok) {
         const errData = await response.json();

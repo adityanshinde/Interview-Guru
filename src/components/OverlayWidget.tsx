@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useAuth } from '@clerk/react';
 import {
   Mic, MicOff, X, Sparkles, Activity, History, Download,
   EyeOff, Keyboard, MessageSquare, Send, AlertTriangle, CheckCircle,
@@ -7,6 +8,10 @@ import {
 } from 'lucide-react';
 import { useTabAudioCapture } from '../hooks/useTabAudioCapture';
 import { useAIAssistant } from '../hooks/useAIAssistant';
+import { usePlanStatus } from '../hooks/usePlanStatus';
+import { useSessionTracking } from '../hooks/useSessionTracking';
+import { UsageBar } from './UsageBar';
+import { PlanBanner } from './PlanBanner';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -330,6 +335,7 @@ function ChatMessage({
 
 // ── Main Widget ───────────────────────────────────────────
 export default function OverlayWidget() {
+  const { getToken } = useAuth();
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [isHidden, setIsHidden] = useState(false);
@@ -355,6 +361,13 @@ export default function OverlayWidget() {
   const [sessionStartTime, setSessionStartTime] = useState<number | null>(null);
   const [elapsedTime, setElapsedTime] = useState('00:00');
   const [copiedAlert, setCopiedAlert] = useState(false);
+  
+  // Plan system status
+  const planStatus = usePlanStatus();
+  
+  // Session tracking
+  const { sessionId, isSessionActive, startSession, updateSession, closeSession } = useSessionTracking();
+  
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const answersEndRef = useRef<HTMLDivElement>(null);
   const lastProcessedQuestionRef = useRef<string | null>(null);
@@ -401,13 +414,25 @@ export default function OverlayWidget() {
   // Hoist toggleListen before useEffects that reference it
   const toggleListen = useCallback(async () => {
     if (isListening) {
-      stopListening(); setSessionStartTime(null); ipc?.send('chat-input-blurred');
+      // Stop listening and close session
+      stopListening();
+      setSessionStartTime(null);
+      ipc?.send('chat-input-blurred');
+      await closeSession();
     } else {
+      // Start listening and begin new session
       ipc?.send('chat-input-focused');
-      try { await startListening(); setSessionStartTime(Date.now()); } catch (e) { console.error(e); }
+      try {
+        await startListening();
+        setSessionStartTime(Date.now());
+        // Start session with metadata
+        await startSession({ persona, resume: resume ? resume.substring(0, 500) : undefined, jd: jd ? jd.substring(0, 500) : undefined });
+      } catch (e) {
+        console.error(e);
+      }
       ipc?.send('chat-input-blurred');
     }
-  }, [isListening, startListening, stopListening]);
+  }, [isListening, startListening, stopListening, closeSession, startSession, persona, resume, jd]);
 
   // Focus chat via IPC
   useEffect(() => {
@@ -437,7 +462,7 @@ export default function OverlayWidget() {
   }, [activeTab, isListening, toggleListen]);
 
   
-  // Push to history + auto-scroll
+  // Push to history + auto-scroll + update session
   useEffect(() => {
     if (detectedQuestion && answer) {
       const questionKey = `${detectedQuestion.question}_${answer.bullets.join('|')}_${answer.explanation?.slice(0, 30)}`;
@@ -465,8 +490,20 @@ export default function OverlayWidget() {
       clearTranscript();
       // Scroll to top of feed (newest item)
       setTimeout(() => answersEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+      
+      // Update session with this Q&A
+      if (isSessionActive && sessionId) {
+        updateSession({
+          question: detectedQuestion.question,
+          answer: answer.bullets,
+          confidence: detectedQuestion.confidence,
+          type: detectedQuestion.type,
+          difficulty: (answer as any).difficulty,
+          timestamp: newItem.timestamp,
+        });
+      }
     }
-  }, [detectedQuestion, answer, clearTranscript]);
+  }, [detectedQuestion, answer, clearTranscript, isSessionActive, sessionId, updateSession]);
 
   // Load settings
   useEffect(() => {
@@ -490,6 +527,15 @@ export default function OverlayWidget() {
     else if (ipc) ipc.send('set-stealth-mode', true);
   }, []);
 
+  // Cleanup: Close session on unmount if still active
+  useEffect(() => {
+    return () => {
+      if (isSessionActive && sessionId) {
+        closeSession();
+      }
+    };
+  }, [isSessionActive, sessionId, closeSession]);
+
   // Enumerate devices for TTS
   useEffect(() => {
     if (showSettings) navigator.mediaDevices.enumerateDevices().then(d => setAudioDevices(d.filter(x => x.kind === 'audiooutput')));
@@ -504,6 +550,19 @@ export default function OverlayWidget() {
     }, 1000);
     return () => clearInterval(iv);
   }, [sessionStartTime, isListening]);
+
+  // Auto-refetch quota status after API calls (when answer/transcript changes)
+  useEffect(() => {
+    if (answer || (transcript && transcript.length > 0)) {
+      // Wait a bit for API calls to complete, then refetch quotas in real-time
+      const timer = setTimeout(() => {
+        if (planStatus.refetch) {
+          planStatus.refetch().catch(err => console.error('Failed to refetch quotas:', err));
+        }
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [answer, transcript, planStatus.refetch]);
 
   const saveSettings = () => {
     localStorage.setItem('groq_api_key', apiKey);
@@ -527,11 +586,23 @@ export default function OverlayWidget() {
     if (!jd || jd.length < 50) return showAlert('Please enter a sufficiently long Job Description first.', 'error');
     setIsGenerating(true); setGenerateResult(null);
     try {
+      const token = await getToken();
       const res = await fetch('/api/generate-cache', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+          'x-api-key': apiKey
+        },
         body: JSON.stringify({ jd, resume })
       });
+
+      if (res.status === 402) {
+        const data = await res.json();
+        setGenerateResult({ status: data.message || 'Chat quota exceeded for cache generation', isError: true });
+        return;
+      }
+
       const data = await res.json();
       setGenerateResult({ status: data.status, isError: !res.ok });
     } catch (e) {
@@ -745,6 +816,36 @@ export default function OverlayWidget() {
               <button onClick={() => setShowSettings(false)} className="icon-btn"><X size={13} /></button>
             </div>
             <div className="overlay-body settings-body">
+              {/* Plan and Usage Display */}
+              <div className="mb-4">
+                <PlanBanner 
+                  plan={planStatus.plan} 
+                  trialDaysRemaining={planStatus.trialDaysRemaining}
+                  onUpgrade={() => setShowSettings(false)}
+                />
+              </div>
+
+              <div className="grid gap-2 mb-4">
+                <UsageBar 
+                  label="Voice Minutes"
+                  used={planStatus.quotas.voiceMinutes.used}
+                  limit={planStatus.quotas.voiceMinutes.limit}
+                  unit="m"
+                />
+                <UsageBar 
+                  label="Chat Messages"
+                  used={planStatus.quotas.chatMessages.used}
+                  limit={planStatus.quotas.chatMessages.limit}
+                />
+                <UsageBar 
+                  label="Interview Sessions"
+                  used={planStatus.quotas.sessions.used}
+                  limit={planStatus.quotas.sessions.limit}
+                />
+              </div>
+
+              <hr className="my-3 border-slate-700" />
+
               <div className="setting-group">
                 <label className="setting-label">Groq API Key</label>
                 <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="gsk_..." className="setting-input" />

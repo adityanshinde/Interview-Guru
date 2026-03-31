@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef } from 'react';
+import { useAuth } from '@clerk/react';
 
 export function useTabAudioCapture(onTranscriptUpdate: (text: string) => void, onError?: (msg: string) => void) {
+  const { getToken } = useAuth();
   const [isListening, setIsListening] = useState(false);
   const [isRateLimited, setIsRateLimited] = useState(false);
   const [transcript, setTranscript] = useState('');
@@ -97,11 +99,13 @@ export function useTabAudioCapture(onTranscriptUpdate: (text: string) => void, o
               try {
                 const apiKey = localStorage.getItem('groq_api_key') || '';
                 const voiceModel = localStorage.getItem('groq_voice_model') || 'whisper-large-v3-turbo';
+                const token = await getToken();
 
                 const response = await fetch('/api/transcribe', {
                   method: 'POST',
                   headers: {
                     'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`,
                     'x-api-key': apiKey,
                     'x-voice-model': voiceModel
                   },
@@ -112,6 +116,13 @@ export function useTabAudioCapture(onTranscriptUpdate: (text: string) => void, o
                   setIsRateLimited(true);
                   const data = await response.json();
                   setTimeout(() => setIsRateLimited(false), (data.retryAfter || 3) * 1000);
+                  return;
+                }
+
+                if (response.status === 402) {
+                  const data = await response.json();
+                  if (onError) onError(data.message || 'Voice quota exceeded');
+                  setIsListening(false);
                   return;
                 }
 
