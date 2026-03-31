@@ -730,6 +730,17 @@ async function startServer() {
   let initialPort = process.env.PORT ? parseInt(process.env.PORT) : 3e3;
   const httpServer = (0, import_http.createServer)(app);
   app.use(import_express.default.json({ limit: "50mb" }));
+  app.use((req, res, next) => {
+    const origin = req.headers.origin || "*";
+    res.header("Access-Control-Allow-Origin", origin);
+    res.header("Access-Control-Allow-Credentials", "true");
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, x-model, x-persona, x-voice-model, x-mode");
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(200);
+    }
+    next();
+  });
   app.use("/api", authMiddleware);
   function getGroq(customKey) {
     const key = customKey || process.env.GROQ_API_KEY;
