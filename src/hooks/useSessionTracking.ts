@@ -21,23 +21,11 @@ export function useSessionTracking() {
    */
   const startSession = useCallback(async (metadata?: { persona?: string; resume?: string; jd?: string }) => {
     try {
-      console.log('[Session] Starting session creation...');
-      
-      // Verify token is available
       const token = await getToken();
       if (!token) {
-        console.error('[Session] ❌ No auth token available - user may not be authenticated');
+        console.error('[Session] No auth token - user may not be authenticated');
         return null;
       }
-      console.log('[Session] ✓ Auth token obtained:', token.substring(0, 20) + '...');
-      
-      const requestBody = {
-        metadata: {
-          startTime: new Date().toISOString(),
-          ...metadata,
-        },
-      };
-      console.log('[Session] Request body:', JSON.stringify(requestBody, null, 2));
       
       const response = await fetch('/api/sessions/start', {
         method: 'POST',
@@ -45,25 +33,25 @@ export function useSessionTracking() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
         },
-        body: JSON.stringify(requestBody),
+        body: JSON.stringify({
+          metadata: {
+            startTime: new Date().toISOString(),
+            ...metadata,
+          },
+        }),
       });
 
-      console.log('[Session] Response status:', response.status);
-      
       if (!response.ok) {
         const errorBody = await response.text();
-        console.error('[Session] ❌ Failed to start session:');
-        console.error('  Status:', response.status, response.statusText);
-        console.error('  Response:', errorBody);
+        console.error('[Session] Failed to start session:', response.status, errorBody);
         return null;
       }
 
       const data = await response.json();
-      console.log('[Session] Response data:', data);
-      
       const newSessionId = data.sessionId;
+      
       if (!newSessionId) {
-        console.error('[Session] ❌ No sessionId in response:', data);
+        console.error('[Session] No sessionId in response');
         return null;
       }
       
@@ -71,11 +59,10 @@ export function useSessionTracking() {
       setIsSessionActive(true);
       questionsBuffer.current = [];
       
-      console.log(`[Session] ✓ Started session: ${newSessionId}`);
+      console.log(`[Session] ✓ Started: ${newSessionId}`);
       return newSessionId;
     } catch (error: any) {
-      console.error('[Session] ❌ Error starting session:', error.message);
-      console.error('[Session] Full error:', error);
+      console.error('[Session] Error:', error.message);
       return null;
     }
   }, [getToken]);

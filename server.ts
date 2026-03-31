@@ -68,7 +68,16 @@ console.log('[Server] Initializing database pool...');
 const dbPool = initializeDatabase();
 console.log('[Server] Database pool initialized');
 
+let serverStarted = false;
+
 export async function startServer(): Promise<number> {
+  // Prevent multiple server instances from starting
+  if (serverStarted) {
+    console.log('[Server] ℹ️  Server already started');
+    return parseInt(process.env.PORT || '3000');
+  }
+  serverStarted = true;
+
   const app = express();
   let initialPort = process.env.PORT ? parseInt(process.env.PORT) : 3000;
   const httpServer = createServer(app);
@@ -921,36 +930,25 @@ RULES:
   app.post('/api/sessions/start', async (req: express.Request, res) => {
     try {
       const authReq = req as AuthRequest;
-      console.log('[API] POST /api/sessions/start called');
-      console.log('[API] User:', authReq.user?.userId || 'NOT AUTHENTICATED');
-      console.log('[API] Request body:', JSON.stringify(req.body, null, 2));
       
       if (!authReq.user) {
-        console.error('[API] ❌ User not authenticated');
         return res.status(401).json({ error: 'User not authenticated' });
       }
 
       const { createSession } = await import('./server/lib/usageStorage');
-      console.log('[API] Calling createSession with userId:', authReq.user.userId);
-      
       const sessionId = await createSession(authReq.user.userId);
-      console.log('[API] createSession returned:', sessionId);
 
       if (!sessionId) {
-        console.error('[API] ❌ Failed to create session (null returned)');
         return res.status(500).json({ error: 'Failed to create session' });
       }
 
-      console.log('[API] ✓ Session created successfully:', sessionId);
       res.json({
         sessionId,
         message: `Session started: ${sessionId}`,
       });
     } catch (error: any) {
-      console.error('[API] ❌ Error in POST /api/sessions/start:');
-      console.error('[API] Error message:', error.message);
-      console.error('[API] Stack:', error.stack);
-      res.status(500).json({ error: 'Failed to start session', details: error.message });
+      console.error('[Session] Failed to start session:', error.message);
+      res.status(500).json({ error: 'Failed to start session' });
     }
   });
 

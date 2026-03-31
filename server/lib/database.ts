@@ -29,18 +29,18 @@ export function initializeDatabase(): Pool {
     ssl: {
       rejectUnauthorized: false,
     },
-    max: 10, // Increase from 1 to 10 for better concurrency
-    min: 2,  // Keep 2 connections open
-    idleTimeoutMillis: 30000, // 30 seconds (was 10s, too aggressive)
-    connectionTimeoutMillis: 10000, // 10 seconds (increased from 5s)
-    statement_timeout: 30000, // 30 second statement timeout
+    max: 10,
+    min: 1,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+    statement_timeout: 30000,
     query_timeout: 30000,
   });
 
-  // Immediate connection test
-  pool.query('SELECT NOW()', (err, res) => {
+  // Test connection asynchronously
+  pool.query('SELECT NOW()', (err) => {
     if (err) {
-      console.error('[DB] ❌ Initial connection test failed:', err.message);
+      console.error('[DB] ❌ Connection test failed:', err.message);
       isConnected = false;
       return;
     }
@@ -48,10 +48,14 @@ export function initializeDatabase(): Pool {
     isConnected = true;
   });
 
-  // Error handling for pool
+  // Error handling for pool with graceful recovery
   pool.on('error', (err) => {
-    console.error('[DB] ❌ Unexpected pool error:', err.message);
-    isConnected = false;
+    console.error('[DB] ⚠️ Pool error:', err.message);
+    // Don't immediately mark as disconnected; allow reconnection
+  });
+
+  pool.on('connect', () => {
+    console.log('[DB] ℹ️ New connection established');
   });
 
   return pool;

@@ -40,25 +40,21 @@ export const authMiddleware: RequestHandler = async (
     console.log(`[Auth] Clerk user ID: ${clerkUserId}, email: ${decoded.email}`);
 
     // Load user from database (with cache)
-    console.log(`[Auth] Loading user from DB: ${clerkUserId}`);
     let userRecord = await getUserFromDB(clerkUserId);
-    console.log(`[Auth] getUserFromDB result: ${userRecord ? 'FOUND' : 'NOT FOUND'}`);
 
     if (!userRecord) {
       // First-time user: create in database
-      console.log(`[Auth] ⚠️  First-time user, creating record...`);
       try {
         userRecord = await createUserInDB(clerkUserId, decoded.email || '');
-        console.log(`[Auth] ✓ User record created: plan=${userRecord.plan}, id=${userRecord.userId.substring(0, 20)}...`);
+        console.log(`[Auth] ✓ New user: ${clerkUserId.substring(0, 20)}...`);
       } catch (createErr) {
-        console.error(`[Auth] ❌ Failed to create user: ${createErr.message}`);
+        console.error(`[Auth] ✗ Failed to create user: ${createErr.message}`);
         throw createErr;
       }
     } else {
-      console.log(`[Auth] ✓ Existing user found: email=${userRecord.email || '(no email)'}, plan=${userRecord.plan}`);
       // Check if user's trial has expired
       if (userRecord.plan === 'free' && checkTrialExpired(userRecord)) {
-        console.log(`[Auth] ✗ Trial expired for user: ${userRecord.email}`);
+        console.log(`[Auth] ✗ Trial expired: ${userRecord.email}`);
         res.status(402).json({
           error: 'Free trial expired',
           action: 'upgrade',

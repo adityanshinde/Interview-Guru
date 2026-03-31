@@ -64,7 +64,6 @@ export async function getUserFromDB(userId: string): Promise<UserRecord | null> 
 }
 
 export async function createUserInDB(userId: string, email: string): Promise<UserRecord> {
-  console.log(`[DB] createUserInDB called with userId: ${userId}, email: ${email}`);
   const now = Date.now();
   const currentMonth = new Date().toISOString().slice(0, 7);
 
@@ -109,19 +108,13 @@ export async function createUserInDB(userId: string, email: string): Promise<Use
       new Date(user.lastActiveAt),
     ];
     
-    console.log(`[DB] Executing INSERT with query: ${query.substring(0, 100)}...`);
-    console.log(`[DB] Parameters: user_id=${params[0]}, email=${params[1]}, plan=${params[2]}`);
-    
-    const result = await executeDatabase(query, params);
-    console.log(`[DB] INSERT execute returned: ${JSON.stringify(result)}`);
+    await executeDatabase(query, params);
 
-    // Cache the new user
     setInCache(userId, user);
-    console.log(`[DB] ✓ New user created and cached: ${userId.substring(0, 20)}...`);
+    console.log(`[DB] ✓ User created: ${userId.substring(0, 20)}...`);
     return user;
   } catch (error: any) {
-    console.error('[DB] ❌ Error creating user:', error.message);
-    console.error('[DB] Stack trace:', error.stack);
+    console.error('[DB] Error creating user:', error.message);
     throw error;
   }
 }
