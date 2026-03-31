@@ -84,6 +84,20 @@ export async function startServer(): Promise<number> {
 
   app.use(express.json({ limit: '50mb' }));
 
+  // ✅ CORS Configuration - Allow requests from all origins
+  app.use((req, res, next) => {
+    const origin = req.headers.origin || '*';
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, x-model, x-persona, x-voice-model, x-mode');
+    
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
   // Apply auth middleware to /api routes
   app.use('/api', authMiddleware);
 
