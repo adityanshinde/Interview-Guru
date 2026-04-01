@@ -4,14 +4,9 @@
  */
 
 export const getAPIUrl = (): string => {
-  // Development mode (localhost)
-  if (process.env.NODE_ENV === 'development') {
-    return '';
-  }
-
-  // Production mode (Vercel or any deployed backend)
-  const productionUrl = process.env.REACT_APP_API_URL || 'https://interview-guru-smoky.vercel.app';
-  return productionUrl;
+  // Default to same-origin so Vercel rewrites and local dev proxy handle /api.
+  // Optional override remains available for advanced deployments.
+  return process.env.VITE_API_URL || '';
 };
 
 export const API_URL = getAPIUrl();

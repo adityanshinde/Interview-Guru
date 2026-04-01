@@ -100,7 +100,7 @@ export async function startServer(): Promise<number> {
     res.header('Access-Control-Allow-Origin', origin);
     res.header('Access-Control-Allow-Credentials', 'true');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, x-model, x-persona, x-voice-model, x-mode, Cache-Control, cache-control, Pragma, pragma');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, x-model, x-persona, x-voice-model, x-mode, x-client-fingerprint, Cache-Control, cache-control, Pragma, pragma');
     
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200);

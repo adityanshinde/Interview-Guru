@@ -29,6 +29,128 @@ function toDatabaseDate(value: number | Date | undefined | null): Date | null {
   return new Date(value);
 }
 
+export interface TrialSecurityRecord {
+  fingerprintHash: string;
+  userId: string;
+  email: string;
+  ipHash: string;
+  userAgentHash: string;
+  blockedReason: string;
+  createdAt: number;
+  lastSeenAt: number;
+  trialExpiresAt: number;
+}
+
+function rowToTrialSecurity(row: any): TrialSecurityRecord {
+  return {
+    fingerprintHash: row.fingerprint_hash,
+    userId: row.user_id,
+    email: row.email,
+    ipHash: row.ip_hash,
+    userAgentHash: row.user_agent_hash,
+    blockedReason: row.blocked_reason ?? '',
+    createdAt: toNumber(row.created_at),
+    lastSeenAt: toNumber(row.last_seen_at),
+    trialExpiresAt: toNumber(row.trial_expires_at),
+  };
+}
+
+export async function getTrialSecurityByFingerprint(fingerprintHash: string): Promise<TrialSecurityRecord | null> {
+  try {
+    const query = `
+      SELECT fingerprint_hash, user_id, email, ip_hash, user_agent_hash, blocked_reason, created_at, last_seen_at, trial_expires_at
+      FROM trial_security
+      WHERE fingerprint_hash = $1
+      LIMIT 1;
+    `;
+
+    const row = await queryDatabaseSingle(query, [fingerprintHash]);
+    return row ? rowToTrialSecurity(row) : null;
+  } catch (error: any) {
+    console.error('[TrialSecurity] Error fetching fingerprint:', error.message);
+    return null;
+  }
+}
+
+export async function registerTrialSecurityClaim(params: {
+  fingerprintHash: string;
+  userId: string;
+  email: string;
+  ipHash: string;
+  userAgentHash: string;
+  blockedReason?: string;
+  trialExpiresAt: number;
+}): Promise<void> {
+  const existing = await getTrialSecurityByFingerprint(params.fingerprintHash);
+  const now = new Date();
+
+  if (existing) {
+    if (existing.userId !== params.userId) {
+      return;
+    }
+
+    await executeDatabase(
+      `
+        UPDATE trial_security
+        SET email = $1,
+            ip_hash = $2,
+            user_agent_hash = $3,
+            blocked_reason = $4,
+            last_seen_at = $5,
+            trial_expires_at = $6
+        WHERE fingerprint_hash = $7 AND user_id = $8;
+      `,
+      [
+        params.email,
+        params.ipHash,
+        params.userAgentHash,
+        params.blockedReason || '',
+        now,
+        new Date(params.trialExpiresAt),
+        params.fingerprintHash,
+        params.userId,
+      ]
+    );
+    return;
+  }
+
+  await executeDatabase(
+    `
+      INSERT INTO trial_security (
+        fingerprint_hash, user_id, email, ip_hash, user_agent_hash,
+        blocked_reason, created_at, last_seen_at, trial_expires_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+    `,
+    [
+      params.fingerprintHash,
+      params.userId,
+      params.email,
+      params.ipHash,
+      params.userAgentHash,
+      params.blockedReason || '',
+      now,
+      now,
+      new Date(params.trialExpiresAt),
+    ]
+  );
+}
+
+export async function touchTrialSecurityClaim(params: {
+  fingerprintHash: string;
+  userId: string;
+  email: string;
+}): Promise<void> {
+  await executeDatabase(
+    `
+      UPDATE trial_security
+      SET email = $1,
+          last_seen_at = $2
+      WHERE fingerprint_hash = $3 AND user_id = $4;
+    `,
+    [params.email, new Date(), params.fingerprintHash, params.userId]
+  );
+}
+
 function rowToUser(row: any): UserRecord {
   return {
     userId: row.user_id,

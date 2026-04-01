@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction, RequestHandler } from 'express';
 import jwt from 'jsonwebtoken';
+import crypto from 'node:crypto';
 import { AuthRequest } from '../../shared/types';
 import { PLAN_LIMITS } from '../../shared/constants/planLimits';
 import {
@@ -7,7 +8,57 @@ import {
   createUserInDB,
   resetMonthlyUsageIfNeeded,
   checkTrialExpired,
+  getTrialSecurityByFingerprint,
+  registerTrialSecurityClaim,
+  touchTrialSecurityClaim,
 } from '../storage/usageStorage';
+
+function normalizeHeaderValue(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) {
+    return value.join(',');
+  }
+
+  return value || '';
+}
+
+function getClientIp(req: Request): string {
+  const forwardedFor = normalizeHeaderValue(req.headers['x-forwarded-for']);
+  if (forwardedFor) {
+    return forwardedFor.split(',')[0].trim();
+  }
+
+  return req.socket.remoteAddress || req.ip || 'unknown-ip';
+}
+
+function buildTrialFingerprint(req: Request): {
+  fingerprintHash: string;
+  ipHash: string;
+  userAgentHash: string;
+} {
+  const salt = process.env.TRIAL_SECURITY_SALT || 'interviewguru-trial-security-v1';
+  const clientIp = getClientIp(req);
+  const userAgent = normalizeHeaderValue(req.headers['user-agent']).toLowerCase();
+  const acceptLanguage = normalizeHeaderValue(req.headers['accept-language']).toLowerCase().toLowerCase();
+  const clientHint = normalizeHeaderValue(req.headers['x-client-fingerprint']).toLowerCase();
+
+  const ipHash = crypto.createHash('sha256').update(`${salt}:${clientIp}`).digest('hex');
+  const userAgentHash = crypto.createHash('sha256').update(`${salt}:${userAgent}`).digest('hex');
+  const fingerprintHash = crypto
+    .createHash('sha256')
+    .update(`${salt}:${clientIp}:${userAgent}:${acceptLanguage}:${clientHint}`)
+    .digest('hex');
+
+  return {
+    fingerprintHash,
+    ipHash,
+    userAgentHash,
+  };
+}
+
+function getTrialExpiryDate(): Date {
+  const trialDays = PLAN_LIMITS.free.trialDays || 7;
+  return new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000);
+}
 
 /**
  * Authentication middleware: Extract Clerk JWT from Authorization header
@@ -39,12 +90,32 @@ export const authMiddleware: RequestHandler = async (
     const clerkUserId = decoded.sub; // Format: "user_XXXXX"
     console.log(`[Auth] Clerk user ID: ${clerkUserId}, email: ${decoded.email}`);
 
+    const trialSecurity = buildTrialFingerprint(req);
+
     // Load user from database (with cache)
     let userRecord = await getUserFromDB(clerkUserId);
 
     if (!userRecord) {
+      const existingTrialClaim = await getTrialSecurityByFingerprint(trialSecurity.fingerprintHash);
+      if (existingTrialClaim && existingTrialClaim.userId !== clerkUserId) {
+        res.status(402).json({
+          error: 'Free trial already used',
+          action: 'upgrade',
+          message: 'This device/network has already claimed the free trial. Please sign in with the original account or upgrade to continue.',
+        });
+        return;
+      }
+
       // First-time user: create in database
       userRecord = await createUserInDB(clerkUserId, decoded.email || '');
+      await registerTrialSecurityClaim({
+        fingerprintHash: trialSecurity.fingerprintHash,
+        userId: clerkUserId,
+        email: decoded.email || '',
+        ipHash: trialSecurity.ipHash,
+        userAgentHash: trialSecurity.userAgentHash,
+        trialExpiresAt: getTrialExpiryDate().getTime(),
+      });
       console.log(`[Auth] ✓ New user: ${clerkUserId.substring(0, 20)}...`);
     } else {
       // Check if user's trial has expired
@@ -56,6 +127,33 @@ export const authMiddleware: RequestHandler = async (
           message: 'Your 7-day trial has ended. Please upgrade to continue.',
         });
         return;
+      }
+
+      if (userRecord.plan === 'free') {
+        const existingTrialClaim = await getTrialSecurityByFingerprint(trialSecurity.fingerprintHash);
+        if (existingTrialClaim && existingTrialClaim.userId !== clerkUserId) {
+          res.status(402).json({
+            error: 'Free trial already used',
+            action: 'upgrade',
+            message: 'This device/network has already claimed the free trial. Please sign in with the original account or upgrade to continue.',
+          });
+          return;
+        }
+
+        await registerTrialSecurityClaim({
+          fingerprintHash: trialSecurity.fingerprintHash,
+          userId: clerkUserId,
+          email: userRecord.email,
+          ipHash: trialSecurity.ipHash,
+          userAgentHash: trialSecurity.userAgentHash,
+          trialExpiresAt: getTrialExpiryDate().getTime(),
+        });
+
+        await touchTrialSecurityClaim({
+          fingerprintHash: trialSecurity.fingerprintHash,
+          userId: clerkUserId,
+          email: userRecord.email,
+        });
       }
     }
 

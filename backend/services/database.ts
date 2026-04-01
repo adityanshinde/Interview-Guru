@@ -100,6 +100,20 @@ async function ensureDatabaseSchema(databasePool: Pool): Promise<void> {
   `);
 
   await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS trial_security (
+      fingerprint_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL UNIQUE,
+      email TEXT NOT NULL DEFAULT '',
+      ip_hash TEXT NOT NULL,
+      user_agent_hash TEXT NOT NULL,
+      blocked_reason TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMP NOT NULL,
+      last_seen_at TIMESTAMP NOT NULL,
+      trial_expires_at TIMESTAMP NOT NULL
+    );
+  `);
+
+  await databasePool.query(`
     CREATE INDEX IF NOT EXISTS idx_sessions_user_status
     ON sessions (user_id, status, start_time DESC);
   `);
@@ -107,6 +121,16 @@ async function ensureDatabaseSchema(databasePool: Pool): Promise<void> {
   await databasePool.query(`
     CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created
     ON audit_logs (user_id, created_at DESC);
+  `);
+
+  await databasePool.query(`
+    CREATE INDEX IF NOT EXISTS idx_trial_security_user_id
+    ON trial_security (user_id);
+  `);
+
+  await databasePool.query(`
+    CREATE INDEX IF NOT EXISTS idx_trial_security_last_seen
+    ON trial_security (last_seen_at DESC);
   `);
 }
 
