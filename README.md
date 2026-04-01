@@ -143,13 +143,19 @@ npm install
 
 ### Environment Setup
 
-Create a `.env` file in the root (see `.env.example`):
+Create a `.env` file in the root by copying [.env.example](.env.example). It now includes the full set of local and Vercel variables:
 
 ```env
-GROQ_API_KEY=your_groq_api_key_here
+VITE_CLERK_PUBLISHABLE_KEY=pk_live_your_production_key
+DATABASE_URL=postgresql://your_user:your_password@your-neon-host.neon.tech/your_db?sslmode=require&channel_binding=require
+GROQ_API_KEY=gsk_your_groq_key
+GEMINI_API_KEY=AIza_your_gemini_key
+TRIAL_SECURITY_SALT=replace_with_a_long_random_secret
+VITE_API_URL=
+APP_URL=https://your-custom-domain.com
 ```
 
-> Your API key can also be entered live inside the app's Settings panel — no restart needed.
+> Your Groq API key can also be entered live inside the app's Settings panel — no restart needed.
 
 ---
 
