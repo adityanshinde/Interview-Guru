@@ -3,17 +3,17 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "main": "electron/main.cjs",
+  "main": "desktop/main/main.cjs",
   "scripts": {
-    "dev": "tsx watch server.ts",
-    "start": "tsx server.ts",
+    "dev": "tsx watch backend/api/server.ts",
+    "start": "tsx backend/api/server.ts",
     "build:ui": "vite build",
-    "build:server": "tsup server.ts --format cjs --out-dir .",
+    "build:server": "tsup backend/api/server.ts --format cjs --out-dir backend/api",
     "build": "npm run build:ui && npm run build:server",
     "preview": "vite preview",
-    "clean": "powershell -Command \"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue dist,release,server.cjs\"",
+    "clean": "powershell -Command \"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue build,dist,release,server.cjs,backend/api/server.cjs\"",
     "lint": "tsc --noEmit",
-    "electron:dev": "node electron-dev.cjs",
+    "electron:dev": "node desktop/main/dev-launcher.cjs",
     "predist": "taskkill /F /IM InterviewGuru.exe 2>nul || exit 0",
     "dist": "npm run build && electron-builder"
   },
@@ -46,13 +46,14 @@
       }
     ],
     "files": [
-      "dist/**/*",
-      "electron/**/*",
-      "server.cjs",
+      "build/**/*",
+      "backend/**/*",
+      "desktop/**/*",
+      "assets/**/*",
       "package.json"
     ],
     "extraMetadata": {
-      "main": "electron/main.cjs"
+      "main": "desktop/main/main.cjs"
     }
   },
   "dependencies": {

@@ -6,11 +6,21 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { pipeline, env } from '@xenova/transformers';
-import { authMiddleware, quotaMiddleware } from './backend/middleware/authMiddleware';
-import { recordVoiceUsage, recordChatUsage, getRemainingQuota, upgradeUserPlan } from './backend/storage/usageStorage';
-import { PLAN_LIMITS } from './shared/constants/planLimits';
-import { AuthRequest } from './shared/types';
-import { initializeDatabase } from './backend/services/database';
+import { authMiddleware, quotaMiddleware } from '../middleware/authMiddleware';
+import { recordVoiceUsage, recordChatUsage, getRemainingQuota, upgradeUserPlan } from '../storage/usageStorage';
+import { PLAN_LIMITS } from '../../shared/constants/planLimits';
+import { AuthRequest } from '../../shared/types';
+import { initializeDatabase } from '../services/database';
+import {
+  buildAnswerConfidencePrompt,
+  buildAnswerVerificationPrompt,
+  buildCacheAnswerPrompt,
+  buildCacheQuestionsPrompt,
+  buildChatSystemPrompt,
+  buildQuestionClassificationPrompt,
+  buildVoiceQuestionConfidencePrompt,
+  buildVoiceSystemPrompt,
+} from '../../shared/prompts';
 
 // Suppress local transformer model warnings and force download
 env.allowLocalModels = false;
@@ -65,7 +75,7 @@ dotenv.config();
 
 // Initialize database connection pool on startup
 console.log('[Server] Initializing database pool...');
-const dbPool = initializeDatabase();
+void initializeDatabase();
 console.log('[Server] Database pool initialized');
 
 let serverStarted = false;
@@ -90,7 +100,7 @@ export async function startServer(): Promise<number> {
     res.header('Access-Control-Allow-Origin', origin);
     res.header('Access-Control-Allow-Credentials', 'true');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, x-model, x-persona, x-voice-model, x-mode');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, x-model, x-persona, x-voice-model, x-mode, Cache-Control, cache-control, Pragma, pragma');
     
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200);
@@ -401,70 +411,13 @@ Rules:
         } catch { /* use defaults */ }
 
         // ── STEP 2: Build Adaptive Prompt ─────────────────────────────
-        // Section structure hint based on question type
-        const sectionHint = questionType === 'coding'
-          ? `Sections MUST be: "Problem Understanding", "Approach & Logic", "Complexity Analysis". Always fill the code field with complete working code.`
-          : questionType === 'behavioral'
-            ? `Sections MUST be: "Situation", "What I Did", "Result & Learnings". Write in confident first-person.`
-            : questionType === 'system_design'
-              ? `Sections: "Architecture Overview", "Core Components", "Trade-offs & Bottlenecks", "Scaling Strategy". Focus on distributed systems thinking.`
-              : `If comparing TWO things: "X Overview", "Y Overview", "Key Differences", "When To Use Which". If one concept: "What It Is", "How It Works", "Trade-offs", "When To Use".`;
-
-        // Difficulty-aware depth instructions
-        const depthHint = difficulty === 'easy'
-          ? `DEPTH: Focus on clarity and intuition. Avoid unnecessary complexity. Prioritize simple, memorable explanations a junior can follow.`
-          : difficulty === 'hard'
-            ? `DEPTH: Break down reasoning deeply. Discuss scalability, reliability, and bottlenecks. Mention trade-offs between approaches. Cite Big-O where relevant.`
-            : `DEPTH: Include practical engineering trade-offs. Mention complexity where relevant. Balance theory with real-world usage.`;
-
-        const chatSystemPrompt = `You are a senior software engineer, system design mentor, and interview coach.
-
-Your task: answer the user's question in a clear, structured, interview-ready format.
-
-STRICT OUTPUT RULE:
-Return ONLY valid JSON. Do NOT include markdown, code fences, commentary, or any text outside the JSON object.
-
-JSON SCHEMA (match exactly):
-{
-  "sections": [
-    {
-      "title": "Short section title (2-5 words)",
-      "content": "2-4 sentences explaining this clearly in a confident, narrative first-person tone. Vary your openers (e.g., 'In my projects...', 'I've found that...', 'Architecturally, I prefer...', 'One thing I prioritize is...'). Avoid repeating 'I typically' or 'In my experience' at the start of every paragraph. NO bullet points inside content.",
-      "points": [
-        "Short key takeaway (max 12 words)",
-        "Short key takeaway (max 12 words)"
-      ]
-    }
-  ],
-  "code": "Complete working code if question asks for coding. Otherwise empty string. No markdown fences.",
-  "codeLanguage": "language name (csharp, python, javascript, java, sql, etc.) or empty string"
-}
-
-SECTION RULES:
-${sectionHint}
-- Minimum 2 sections, maximum 5 sections.
-- Each "content": 2-4 sentences, natural prose, NO nested bullets.
-- Each "points": 2-4 items, max 12 words each, crisp and scannable.
-- Titles: short, bold-worthy (e.g. "Lambda Syntax", "Time Complexity", "Key Trade-offs").
-
-CODE RULES:
-- Only include code if the question asks to write, implement, create, or demonstrate code.
-- If code is included: complete and runnable, comments on key lines, handle edge cases (null, empty, etc.).
-- No markdown fences inside the "code" field.
-
-${depthHint}
-
-CONTEXT:
-Resume: ${resume || 'Not provided'}
-Job Description: ${jd || 'Not provided'}
-Persona: ${persona}
-
-PERSONA ADJUSTMENTS:
-${persona === 'Technical Interviewer' ? '- Emphasize architecture decisions, Big-O complexity, trade-offs, and production concerns.' : ''}
-${persona === 'Executive Assistant' ? '- Emphasize business impact, strategic implications, and communication clarity.' : ''}
-${persona === 'Language Translator' ? '- Emphasize language nuance, cultural context, and translation accuracy.' : ''}
-
-FINAL RULE: Return ONLY the JSON object. No markdown. No explanations outside JSON.`;
+        const chatSystemPrompt = buildChatSystemPrompt({
+          questionType,
+          difficulty,
+          resume,
+          jd,
+          persona,
+        });
 
         // ── STEP 3: Generate Answer ────────────────────────────────────
         const chatModel = "llama-3.3-70b-versatile";
@@ -498,8 +451,7 @@ FINAL RULE: Return ONLY the JSON object. No markdown. No explanations outside JS
             const confCompletion = await groq.chat.completions.create({
               model: "llama-3.1-8b-instant",
               messages: [
-                { role: "system", content: "You are evaluating the quality and correctness of an AI's answer to an interview question. Rate your confidence that the answer correctly and fully addresses the question. Output ONLY a JSON object: {\"confidence\": number} where the number is a float between 0.0 (completely wrong/irrelevant) and 1.0 (perfectly accurate/highly relevant)." },
-                { role: "user", content: `Question: ${transcript}\nAnswer: ${JSON.stringify(chatData)}` }
+                { role: "system", content: buildAnswerConfidencePrompt(transcript, JSON.stringify(chatData)) },
               ],
               temperature: 0.1,
             });
@@ -521,13 +473,7 @@ FINAL RULE: Return ONLY the JSON object. No markdown. No explanations outside JS
               messages: [
                 {
                   role: "system",
-                  content: `You are a senior engineer reviewing an AI-generated interview answer for correctness.
-Check for: factual errors, incorrect Big-O complexity, hallucinated APIs or syntax, missing important edge cases.
-Return ONLY valid JSON: {"valid": boolean, "issues": ["issue description"], "improvedSections": <same sections array format, or null if valid>}`
-                },
-                {
-                  role: "user",
-                  content: `Original Question: ${transcript}\nGenerated Answer: ${JSON.stringify(chatData)}`
+                  content: buildAnswerVerificationPrompt(transcript, JSON.stringify(chatData))
                 }
               ],
               model: "llama-3.1-8b-instant", // Fast + cheap for verification
@@ -578,58 +524,7 @@ Return ONLY valid JSON: {"valid": boolean, "issues": ["issue description"], "imp
         // VOICE MODE — Low Latency, High Signal Density
         // ════════════════════════════════════════════════════════════════
       } else {
-        const voiceSystemPrompt = `You are an AI assistant helping a candidate during a live interview.
-Analyze the transcript and determine if the interviewer asked a REAL interview question.
-Ignore conversational filler, pleasantries, or technical difficulties (e.g., "Can you hear me?", "How are you?").
-
-Return ONLY valid JSON. No markdown. No extra text.
-
-JSON FORMAT:
-{
-  "isQuestion": boolean,
-  "question": "Detected question or empty string",
-  "confidence": 0.0-1.0,
-  "type": "technical | behavioral | general",
-  "bullets": [
-    "Short talking point (max 10 words)",
-    "Short talking point (max 10 words)",
-    "Short talking point (max 10 words)",
-    "Short talking point (max 10 words)"
-  ],
-  "spoken": "1-2 sentence confident answer the user could say aloud."
-}
-
-DETECTION RULES:
-- If transcript contains a genuine interview question: isQuestion = true, extract the main question
-- If it's just filler/pleasantries (e.g. "I can see your screen", "Let's get started"): isQuestion = false
-- If no question detected: isQuestion = false, return empty bullets array
-
-BULLET STYLE — TECHNICAL QUESTIONS:
-Include keyword-dense talking points with:
-• Algorithm or pattern name
-• Big-O complexity (e.g. O(n log n))
-• Key trade-offs
-• Production/edge case consideration
-Examples: "HashMap lookup O(1) average case" | "Avoid nested loops, use sorting O(n log n)" | "Handle null and empty input edge cases"
-
-BULLET STYLE — BEHAVIORAL QUESTIONS (STAR method):
-• Situation: what was the context?
-• Task: what was your responsibility?
-• Action: what did you specifically do?
-• Result: measurable outcome
-Examples: "Legacy API slowed under heavy traffic" | "Led async processing refactor" | "Reduced latency by 60%" | "Improved reliability 99.9% uptime"
-
-SPOKEN FIELD: A confident, complete 1-2 sentence answer the user can say out loud immediately.
-
-CONTEXT:
-Resume: ${resume || 'Not provided'}
-Job Description: ${jd || 'Not provided'}
-Persona: ${persona}
-${persona === 'Technical Interviewer' ? '\nFocus on engineering depth, Big-O complexity, and edge cases.' : ''}
-${persona === 'Executive Assistant' ? '\nFocus on business impact, decision making, and strategy.' : ''}
-${persona === 'Language Translator' ? '\nTranslate accurately while maintaining tone and cultural context.' : ''}
-
-Return ONLY JSON.`;
+        const voiceSystemPrompt = buildVoiceSystemPrompt({ resume, jd, persona });
 
         const selectedVoiceModel = customModel || "llama-3.1-8b-instant";
         const voiceParams: any = {
@@ -660,8 +555,7 @@ Return ONLY JSON.`;
             const confCompletion = await groq.chat.completions.create({
               model: "llama-3.1-8b-instant",
               messages: [
-                { role: "system", content: "You are evaluating an audio transcript to determine if it contains a genuine interview question or just filler conversation. Rate your confidence that the transcript contains a real question. Return ONLY a JSON object: {\"confidence\": number} where the number is a float between 0.0 (definitely just filler/no question) and 1.0 (definitely a clear question)." },
-                { role: "user", content: `Transcript: "${transcript}"` }
+                { role: "system", content: buildVoiceQuestionConfidencePrompt(transcript) },
               ],
               response_format: { type: "json_object" },
               temperature: 0.1,
@@ -726,18 +620,8 @@ Return ONLY JSON.`;
         messages: [
           {
             role: "system",
-            content: `You are a senior technical interviewer. Based on this job description, generate 35 distinct, highly likely interview questions.
-Include concept questions, system design questions, coding queries, and behavioral questions.
-Return ONLY a valid JSON object matching this exact schema:
-{
-  "questions": [
-    "Explain the difference between REST and GraphQL.",
-    "Design a scalable notification system.",
-    "Tell me about a time you resolved a difficult bug."
-  ]
-}`
-          },
-          { role: "user", content: `Job Description:\n${jd}` }
+            content: buildCacheQuestionsPrompt(jd)
+          }
         ],
         model: "llama-3.1-8b-instant",
         temperature: 0.3,
@@ -756,34 +640,9 @@ Return ONLY a valid JSON object matching this exact schema:
 
       // Step 2: Generate Answers & Embeddings
       // Run sequentially to keep Groq happy, but fast because 8b model
-      const systemPrompt = `You are a senior software engineer and interview coach.
-Answer the interview question comprehensively. Ensure you provide paraphrased variants of the question to assist vector similarity searching.
-Return ONLY valid JSON matching exactly:
-{
-  "variants": ["Paraphrase 1", "Paraphrase 2", "Paraphrase 3"],
-  "sections": [
-    {
-      "title": "Short section title (2-5 words)",
-      "content": "2-4 sentences explaining this clearly in a confident, narrative first-person tone. Vary your openers (e.g., 'In my projects...', 'I've found that...', 'Architecturally, I prefer...', 'One thing I prioritize is...'). Avoid repeating 'I typically' or 'In my experience' at the start of every paragraph.",
-      "points": ["Scannable key takeaway max 10 words", "Another short takeaway"]
-    }
-  ],
-  "bullets": ["Technical bullet 1", "Technical bullet 2", "Technical bullet 3"],
-  "code": "Complete code snippet if coding is requested, else strictly an empty string",
-  "codeLanguage": "language name or empty string",
-  "spoken": "A 1-2 sentence confident spoken answer.",
-  "type": "concept",
-  "difficulty": "medium",
-  "category": "backend"
-}
-Keep sections to mostly 2-3 maximum. DO NOT include markdown code fences overall.
-RULES:
-1. "code" MUST ALWAYS be a string. Never null. Always use "" for empty code.
-2. "difficulty" MUST ALWAYS be included exactly as "easy", "medium", or "hard".
-3. "variants" MUST include at least 2 conversational variations of the question.`;
-
       for (const q of questions) {
          try {
+          const systemPrompt = buildCacheAnswerPrompt({ question: q, resume, jd });
             const ansCompletion = await groq.chat.completions.create({
               messages: [
                  { role: "system", content: systemPrompt },
@@ -851,7 +710,7 @@ RULES:
         return res.status(401).json({ error: 'User not authenticated' });
       }
 
-      const { getUserFromDB, resetMonthlyUsageIfNeeded, calculateTrialDaysRemaining, checkTrialExpired } = await import('./backend/storage/usageStorage');
+      const { getUserFromDB, resetMonthlyUsageIfNeeded, calculateTrialDaysRemaining, checkTrialExpired } = await import('../storage/usageStorage');
       const user = await getUserFromDB(authReq.user.userId);
 
       if (!user) {
@@ -949,7 +808,7 @@ RULES:
         return res.status(401).json({ error: 'User not authenticated' });
       }
 
-      const { createSession } = await import('./backend/storage/usageStorage');
+      const { createSession } = await import('../storage/usageStorage');
       const sessionId = await createSession(authReq.user.userId);
 
       if (!sessionId) {
@@ -977,7 +836,7 @@ RULES:
         return res.status(401).json({ error: 'User not authenticated or missing session ID' });
       }
 
-      const { updateSession } = await import('./backend/storage/usageStorage');
+      const { updateSession } = await import('../storage/usageStorage');
       await updateSession(sessionId, questionsAsked || 0, voiceMinutesUsed || 0);
 
       res.json({
@@ -1003,7 +862,7 @@ RULES:
 
       const finalStatus = (status === 'completed' || status === 'abandoned') ? status : 'completed';
 
-      const { closeSession } = await import('./backend/storage/usageStorage');
+      const { closeSession } = await import('../storage/usageStorage');
       await closeSession(sessionId, finalStatus);
 
       res.json({
@@ -1020,7 +879,7 @@ RULES:
   // GET /api/sessions/active — Get all currently active sessions (admin/monitoring)
   app.get('/api/sessions/active', async (req: express.Request, res) => {
     try {
-      const { getActiveSessions } = await import('./backend/storage/usageStorage');
+      const { getActiveSessions } = await import('../storage/usageStorage');
       const activeSessions = await getActiveSessions();
 
       res.json({
@@ -1042,7 +901,7 @@ RULES:
         return res.status(401).json({ error: 'User not authenticated' });
       }
 
-      const { getUserSessionHistory } = await import('./backend/storage/usageStorage');
+      const { getUserSessionHistory } = await import('../storage/usageStorage');
       const history = await getUserSessionHistory(authReq.user.userId);
 
       res.json({
@@ -1065,12 +924,12 @@ RULES:
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, 'dist');
-    app.use(express.static(distPath));
+    const buildPath = path.join(__dirname, '../../build');
+    app.use(express.static(buildPath));
     
     // SPA Fallback for React Router
     app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+      res.sendFile(path.join(buildPath, 'index.html'));
     });
   }
 
