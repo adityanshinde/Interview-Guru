@@ -80,7 +80,7 @@ console.log('[Server] Database pool initialized');
 
 let serverStarted = false;
 
-export async function startServer(): Promise<number> {
+export async function startServer(): Promise<number | express.Express> {
   // Prevent multiple server instances from starting
   if (serverStarted) {
     console.log('[Server] ℹ️  Server already started');
@@ -933,6 +933,10 @@ Rules:
     });
   }
 
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    return app;
+  }
+
   return new Promise((resolve) => {
     const startListen = (port: number) => {
       httpServer.listen(port, '0.0.0.0', () => {
@@ -951,5 +955,10 @@ Rules:
   });
 }
 
-// Always start in dev script
-startServer().catch(console.error);
+// Always start in dev script.
+// In Vercel/serverless environments, this resolves to the configured Express app instead of listening.
+export const serverBootstrap = startServer();
+
+if (!process.env.VERCEL && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  serverBootstrap.catch(console.error);
+}
